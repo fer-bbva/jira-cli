@@ -13,7 +13,7 @@ import (
 	"github.com/ankitpokhrel/jira-cli/pkg/jira"
 )
 
-const playwrightSessionName = "jira-sso"
+const playwrightSessionName = "jira"
 
 const (
 	playwrightLoginTimeout  = 5 * time.Minute
@@ -26,26 +26,32 @@ func playwrightCLIAvailable() bool {
 }
 
 func authenticateViaPlaywright(server, expectedLogin string) (*jira.Me, string, error) {
-	cmdutil.Warn("Playwright CLI detected. Opening a persistent Chrome window for interactive SSO login.")
+	workspaceDir, err := playwrightWorkspaceDir()
+	if err != nil {
+		return nil, "", err
+	}
+	profileDir, err := playwrightProfileDir()
+	if err != nil {
+		return nil, "", err
+	}
+	statePath, err := playwrightStatePath(workspaceDir)
+	if err != nil {
+		return nil, "", err
+	}
+
+	cmdutil.Warn("Playwright CLI detected. Opening an isolated Jira browser session for interactive SSO login.")
 	cmdutil.Warn("Complete the BBVA login there, including the mobile second factor. I will detect the Jira session automatically.")
 
-	if _, err := runPlaywrightCLI("-s="+playwrightSessionName, "open", server, "--browser=chrome", "--headed", "--persistent"); err != nil {
+	_ = closePlaywrightSession(workspaceDir)
+	defer func() { _ = closePlaywrightSession(workspaceDir) }()
+
+	if _, err := runPlaywrightCLIInDir(workspaceDir, "-s="+playwrightSessionName, "open", server, "--browser=chrome", "--headed", "--profile="+profileDir); err != nil {
 		return nil, "", fmt.Errorf("unable to open Playwright browser session: %w", err)
 	}
 
-	if _, err := runPlaywrightCLI("-s="+playwrightSessionName, "show"); err != nil {
-		cmdutil.Warn("Unable to open Playwright session dashboard: %s", err.Error())
-	}
-
-	stateDir := filepath.Join(".playwright-cli", "jira-cli")
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		return nil, "", fmt.Errorf("unable to create Playwright state directory: %w", err)
-	}
-	statePath := filepath.Join(stateDir, "jira-auth-state.json")
-
 	deadline := time.Now().Add(playwrightLoginTimeout)
 	for {
-		me, sessionCookie, err := tryImportPlaywrightState(server, expectedLogin, statePath)
+		me, sessionCookie, err := tryImportPlaywrightState(workspaceDir, server, expectedLogin, statePath)
 		if err == nil {
 			return me, sessionCookie, nil
 		}
@@ -59,9 +65,9 @@ func authenticateViaPlaywright(server, expectedLogin string) (*jira.Me, string, 
 
 }
 
-func tryImportPlaywrightState(server, expectedLogin, statePath string) (*jira.Me, string, error) {
+func tryImportPlaywrightState(workspaceDir, server, expectedLogin, statePath string) (*jira.Me, string, error) {
 
-	if _, err := runPlaywrightCLI("-s="+playwrightSessionName, "state-save", statePath); err != nil {
+	if _, err := runPlaywrightCLIInDir(workspaceDir, "-s="+playwrightSessionName, "state-save", statePath); err != nil {
 		return nil, "", fmt.Errorf("unable to save Playwright browser state: %w", err)
 	}
 
@@ -87,6 +93,43 @@ func tryImportPlaywrightState(server, expectedLogin, statePath string) (*jira.Me
 	return me, sessionCookie, nil
 }
 
+func playwrightWorkspaceDir() (string, error) {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("unable to determine user cache dir for Playwright session: %w", err)
+	}
+	path := filepath.Join(cacheDir, "jira-cli", "playwright", "workspace")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return "", fmt.Errorf("unable to create Playwright workspace dir: %w", err)
+	}
+	return path, nil
+}
+
+func playwrightProfileDir() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("unable to determine user config dir for Playwright profile: %w", err)
+	}
+	path := filepath.Join(configDir, "jira-cli", "playwright", "profiles", "jira")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return "", fmt.Errorf("unable to create Playwright profile dir: %w", err)
+	}
+	return path, nil
+}
+
+func playwrightStatePath(workspaceDir string) (string, error) {
+	path := filepath.Join(workspaceDir, ".playwright-cli", "jira-auth-state.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("unable to create Playwright state dir: %w", err)
+	}
+	return path, nil
+}
+
+func closePlaywrightSession(workspaceDir string) error {
+	_, err := runPlaywrightCLIInDir(workspaceDir, "-s="+playwrightSessionName, "close")
+	return err
+}
+
 func playwrightCLICommand() ([]string, error) {
 	if _, err := exec.LookPath("playwright-cli"); err == nil {
 		return []string{"playwright-cli"}, nil
@@ -98,12 +141,19 @@ func playwrightCLICommand() ([]string, error) {
 }
 
 func runPlaywrightCLI(args ...string) (string, error) {
+	return runPlaywrightCLIInDir("", args...)
+}
+
+func runPlaywrightCLIInDir(dir string, args ...string) (string, error) {
 	base, err := playwrightCLICommand()
 	if err != nil {
 		return "", err
 	}
 	cmdArgs := append(base[1:], args...)
 	cmd := exec.Command(base[0], cmdArgs...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
