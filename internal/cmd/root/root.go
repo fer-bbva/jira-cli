@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/ankitpokhrel/jira-cli/internal/cmd/board"
+	"github.com/ankitpokhrel/jira-cli/internal/cmd/auth"
 	"github.com/ankitpokhrel/jira-cli/internal/cmd/completion"
 	"github.com/ankitpokhrel/jira-cli/internal/cmd/epic"
 	initCmd "github.com/ankitpokhrel/jira-cli/internal/cmd/init"
@@ -130,6 +131,7 @@ func NewCmdRoot() *cobra.Command {
 func addChildCommands(cmd *cobra.Command) {
 	cmd.AddCommand(
 		initCmd.NewCmdInit(),
+		auth.NewCmdAuth(),
 		issue.NewCmdIssue(),
 		epic.NewCmdEpic(),
 		sprint.NewCmdSprint(),
@@ -149,11 +151,13 @@ func addChildCommands(cmd *cobra.Command) {
 
 func cmdRequireToken(cmd string) bool {
 	allowList := []string{
+		"auth",
 		"init",
 		"help",
 		"jira",
 		"version",
 		"completion",
+		"sso",
 		"__complete", "__completeNoDesc", // Subcommand name during autocompletion call.
 		"man",
 		"refresh",

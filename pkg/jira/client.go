@@ -175,7 +175,7 @@ func NewClient(c Config, opts ...ClientFunc) *Client {
 		opt(&client)
 	}
 
-	if c.AuthType != nil && *c.AuthType == AuthTypeCookie && client.token != "" {
+	if c.AuthType != nil && *c.AuthType == AuthTypeCookie {
 		client.jar = newCookieJar(client.server, client.token)
 	}
 
