@@ -46,6 +46,11 @@ func authenticate(cmd *cobra.Command, _ []string) {
 		return
 	}
 
+	if me, sessionCookie, ok := existingStoredSession(server, login); ok {
+		persistAuthenticatedSession(me, sessionCookie, login)
+		return
+	}
+
 	noPlaywright, err := cmd.Flags().GetBool("no-playwright")
 	cmdutil.ExitIfError(err)
 	if !noPlaywright && playwrightCLIAvailable() {
@@ -138,6 +143,34 @@ func persistAuthenticatedSession(me *jira.Me, sessionCookie, configured string) 
 
 	cmdutil.Success("SSO login completed for %s (%s)", me.Name, me.Login)
 	cmdutil.Warn("Your browser-backed Jira session is now stored in the keychain. Run 'jira session warmup' if the first request still needs reheating.")
+}
+
+func existingStoredSession(server, configured string) (*jira.Me, string, bool) {
+	configuredLogin := strings.TrimSpace(configured)
+	if configuredLogin == "" {
+		return nil, "", false
+	}
+
+	sessionCookie, err := keyring.Get("jira-cli", configuredLogin)
+	if err != nil || strings.TrimSpace(sessionCookie) == "" {
+		return nil, "", false
+	}
+
+	client := jira.NewClient(jira.Config{
+		Server:   server,
+		APIToken: sessionCookie,
+		AuthType: &[]jira.AuthType{jira.AuthTypeCookie}[0],
+	})
+	me, err := client.Me()
+	if err != nil {
+		return nil, "", false
+	}
+	if me.Login != configuredLogin {
+		return nil, "", false
+	}
+
+	cmdutil.Success("Existing Jira session is still valid for %s (%s)", me.Name, me.Login)
+	return me, sessionCookie, true
 }
 
 func authenticateViaBrowser(server, expectedLogin string) (*jira.Me, string, error) {

@@ -17,7 +17,7 @@ const playwrightSessionName = "jira"
 
 const (
 	playwrightLoginTimeout  = 5 * time.Minute
-	playwrightPollInterval  = 3 * time.Second
+	playwrightPollInterval  = 1 * time.Second
 )
 
 func playwrightCLIAvailable() bool {
@@ -81,7 +81,6 @@ func tryImportPlaywrightState(workspaceDir, server, expectedLogin, statePath str
 		APIToken: sessionCookie,
 		AuthType: &[]jira.AuthType{jira.AuthTypeCookie}[0],
 	})
-	_, _ = client.WarmupSession()
 	me, err := client.Me()
 	if err != nil {
 		return nil, "", fmt.Errorf("playwright-imported browser session is not valid: %w", err)

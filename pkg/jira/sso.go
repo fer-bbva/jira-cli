@@ -18,6 +18,7 @@ const (
 	ssoApprovalAttempts       = 20
 	ssoApprovalInterval       = 3 * time.Second
 	htmlAcceptHeader          = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+	browserAcceptLanguage     = "es-ES,es;q=0.9"
 )
 
 var ssoRedirectPattern = regexp.MustCompile(`window\.location\.assign\("([^"]+)"\)`)
@@ -105,7 +106,12 @@ func (c *Client) AuthenticateSSO(username, password string) (*Me, string, error)
 
 func (c *Client) browserGet(client *http.Client, target, referer string) (*url.URL, string, error) {
 	req, err := c.buildRequest(http.MethodGet, target, nil, Header{
-		"Accept": htmlAcceptHeader,
+		"Accept":                 htmlAcceptHeader,
+		"Accept-Language":        browserAcceptLanguage,
+		"Sec-Fetch-Dest":         "document",
+		"Sec-Fetch-Mode":         "navigate",
+		"Sec-Fetch-Site":         secFetchSiteValue(referer, target),
+		"Upgrade-Insecure-Requests": "1",
 	})
 	if err != nil {
 		return nil, "", err
@@ -125,7 +131,7 @@ func (c *Client) browserGet(client *http.Client, target, referer string) (*url.U
 		return nil, "", err
 	}
 	if res.StatusCode >= http.StatusBadRequest {
-		return nil, "", fmt.Errorf("jira: SSO bootstrap request failed with %s", res.Status)
+		return nil, "", fmt.Errorf("jira: SSO bootstrap request failed with %s at %s%s", res.Status, target, summarizeHTMLTitle(body))
 	}
 
 	return res.Request.URL, string(body), nil
@@ -133,9 +139,14 @@ func (c *Client) browserGet(client *http.Client, target, referer string) (*url.U
 
 func (c *Client) browserPostForm(client *http.Client, target string, values url.Values, referer string) (*url.URL, string, error) {
 	req, err := c.buildRequest(http.MethodPost, target, []byte(values.Encode()), Header{
-		"Accept":       htmlAcceptHeader,
-		"Content-Type": "application/x-www-form-urlencoded",
-		"Origin":       originOf(target),
+		"Accept":                  htmlAcceptHeader,
+		"Accept-Language":         browserAcceptLanguage,
+		"Content-Type":            "application/x-www-form-urlencoded",
+		"Origin":                  originOf(target),
+		"Sec-Fetch-Dest":          "document",
+		"Sec-Fetch-Mode":          "navigate",
+		"Sec-Fetch-Site":          secFetchSiteValue(referer, target),
+		"Upgrade-Insecure-Requests": "1",
 	})
 	if err != nil {
 		return nil, "", err
@@ -155,7 +166,7 @@ func (c *Client) browserPostForm(client *http.Client, target string, values url.
 		return nil, "", err
 	}
 	if res.StatusCode >= http.StatusBadRequest {
-		return nil, "", fmt.Errorf("jira: SSO form POST failed with %s", res.Status)
+		return nil, "", fmt.Errorf("jira: SSO form POST failed with %s at %s%s", res.Status, target, summarizeHTMLTitle(body))
 	}
 
 	return res.Request.URL, string(body), nil
@@ -280,6 +291,24 @@ func originOf(target string) string {
 	return u.Scheme + "://" + u.Host
 }
 
+func secFetchSiteValue(referer, target string) string {
+	if referer == "" {
+		return "none"
+	}
+	ref, err := url.Parse(referer)
+	if err != nil {
+		return "same-origin"
+	}
+	tgt, err := url.Parse(target)
+	if err != nil {
+		return "same-origin"
+	}
+	if strings.EqualFold(ref.Host, tgt.Host) {
+		return "same-origin"
+	}
+	return "same-site"
+}
+
 func (c *Client) cookieToken() string {
 	if c.jar == nil {
 		return ""
@@ -298,4 +327,27 @@ func (c *Client) cookieToken() string {
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "; ")
+}
+
+func summarizeHTMLTitle(body []byte) string {
+	text := string(body)
+	if matches := regexp.MustCompile(`(?is)<title>(.*?)</title>`).FindStringSubmatch(text); len(matches) > 1 {
+		title := strings.TrimSpace(html.UnescapeString(matches[1]))
+		if title != "" {
+			return fmt.Sprintf(" | page=%q", title)
+		}
+	}
+
+	if idx := strings.Index(strings.ToLower(text), "transaction id:"); idx != -1 {
+		snippet := text[idx:]
+		snippet = strings.ReplaceAll(snippet, "\n", " ")
+		snippet = strings.ReplaceAll(snippet, "\r", " ")
+		snippet = strings.Join(strings.Fields(snippet), " ")
+		if len(snippet) > 120 {
+			snippet = snippet[:120]
+		}
+		return fmt.Sprintf(" | %s", snippet)
+	}
+
+	return ""
 }
