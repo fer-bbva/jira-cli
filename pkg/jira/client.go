@@ -10,7 +10,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -33,6 +35,9 @@ const (
 
 	apiVersion2 = "v2"
 	apiVersion3 = "v3"
+
+	browserUserAgent        = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+	cookieRetryAttemptsMax = 4
 )
 
 var (
@@ -117,6 +122,7 @@ type Config struct {
 // Client is a jira client.
 type Client struct {
 	transport http.RoundTripper
+	jar       http.CookieJar
 	insecure  bool
 	server    string
 	login     string
@@ -134,13 +140,17 @@ func NewClient(c Config, opts ...ClientFunc) *Client {
 	client := Client{
 		server:   strings.TrimSuffix(c.Server, "/"),
 		login:    c.Login,
-		token:    c.APIToken,
+		token:    NormalizeCookieToken(c.APIToken),
 		authType: c.AuthType,
 		debug:    c.Debug,
 	}
 
 	for _, opt := range opts {
 		opt(&client)
+	}
+
+	if c.AuthType != nil && *c.AuthType == AuthTypeCookie && client.token != "" {
+		client.jar = newCookieJar(client.server, client.token)
 	}
 
 	transport := &http.Transport{
@@ -251,7 +261,14 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body []by
 		err error
 	)
 
-	req, err = http.NewRequest(method, endpoint, bytes.NewReader(body))
+
+	// Set default auth type to `basic`.
+	if c.authType == nil {
+		basic := AuthTypeBasic
+		c.authType = &basic
+	}
+
+	req, err = c.buildRequest(method, endpoint, body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -262,32 +279,143 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body []by
 		}
 	}()
 
+	httpClient := &http.Client{Transport: c.transport, Jar: c.jar}
+
+	res, err = httpClient.Do(req.WithContext(ctx))
+	if err != nil {
+		return nil, err
+	}
+
+	if c.authType.String() == string(AuthTypeCookie) && method == http.MethodGet && !strings.HasSuffix(endpoint, baseURLv2+"/serverInfo") {
+		for attempt := 0; attempt < cookieRetryAttemptsMax && res.StatusCode == http.StatusUnauthorized; attempt++ {
+			_ = res.Body.Close()
+
+			_ = c.warmupCookieSession(ctx, httpClient, endpoint)
+
+			req, err = c.buildRequest(method, endpoint, body, headers)
+			if err != nil {
+				return nil, err
+			}
+
+			res, err = httpClient.Do(req.WithContext(ctx))
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return res, nil
+}
+
+func (c *Client) buildRequest(method, target string, body []byte, headers Header) (*http.Request, error) {
+	r, err := http.NewRequest(method, target, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+
 	for k, v := range headers {
-		req.Header.Set(k, v)
+		r.Header.Set(k, v)
 	}
 
-	// Set default auth type to `basic`.
-	if c.authType == nil {
-		basic := AuthTypeBasic
-		c.authType = &basic
+	if c.authType != nil && c.authType.String() == string(AuthTypeCookie) {
+		if r.Header.Get("User-Agent") == "" {
+			r.Header.Set("User-Agent", browserUserAgent)
+		}
+		if r.Header.Get("Referer") == "" {
+			r.Header.Set("Referer", cookieAuthReferer(c.server, target))
+		}
 	}
 
-	// When need to compare using `String()` here, it is used to handle cases where the
-	// authentication type might be empty, ensuring it defaults to the appropriate value.
 	switch c.authType.String() {
 	case string(AuthTypeMTLS):
 		if c.token != "" {
-			req.Header.Add("Authorization", "Bearer "+c.token)
+			r.Header.Add("Authorization", "Bearer "+c.token)
 		}
 	case string(AuthTypeBearer):
-		req.Header.Add("Authorization", "Bearer "+c.token)
+		r.Header.Add("Authorization", "Bearer "+c.token)
+	case string(AuthTypeCookie):
 	case string(AuthTypeBasic):
-		req.SetBasicAuth(c.login, c.token)
+		r.SetBasicAuth(c.login, c.token)
 	}
 
-	httpClient := &http.Client{Transport: c.transport}
+	return r, nil
+}
 
-	return httpClient.Do(req.WithContext(ctx))
+func newCookieJar(server, token string) http.CookieJar {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil
+	}
+
+	u, err := url.Parse(server)
+	if err != nil {
+		return jar
+	}
+
+	var cookies []*http.Cookie
+	token = NormalizeCookieToken(token)
+
+	if strings.Contains(token, "=") {
+		for _, part := range strings.Split(token, ";") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+
+			kv := strings.SplitN(part, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+
+			cookies = append(cookies, &http.Cookie{
+				Name:  strings.TrimSpace(kv[0]),
+				Value: strings.TrimSpace(kv[1]),
+				Path:  "/",
+			})
+		}
+	} else if token != "" {
+		cookies = append(cookies, &http.Cookie{
+			Name:  "JSESSIONID",
+			Value: token,
+			Path:  "/",
+		})
+	}
+
+	jar.SetCookies(u, cookies)
+
+	return jar
+}
+
+func cookieAuthReferer(server, target string) string {
+	u, err := url.Parse(target)
+	if err != nil {
+		return server + "/"
+	}
+
+	const (
+		issuePathV2 = "/rest/api/2/issue/"
+		issuePathV3 = "/rest/api/3/issue/"
+	)
+
+	path := u.Path
+	idx := strings.Index(path, issuePathV2)
+	baseLen := len(issuePathV2)
+	if idx == -1 {
+		idx = strings.Index(path, issuePathV3)
+		baseLen = len(issuePathV3)
+	}
+
+	if idx != -1 {
+		key := path[idx+baseLen:]
+		if cut := strings.Index(key, "/"); cut != -1 {
+			key = key[:cut]
+		}
+		if key != "" {
+			return server + "/browse/" + key
+		}
+	}
+
+	return server + "/"
 }
 
 func dump(req *http.Request, res *http.Response) {

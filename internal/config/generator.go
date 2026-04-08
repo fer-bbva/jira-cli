@@ -11,6 +11,7 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/AlecAivazis/survey/v2/core"
 	"github.com/spf13/viper"
+	"github.com/zalando/go-keyring"
 
 	"github.com/ankitpokhrel/jira-cli/api"
 	"github.com/ankitpokhrel/jira-cli/internal/cmdutil"
@@ -171,6 +172,12 @@ func (c *JiraCLIConfigGenerator) Generate() (string, error) {
 		}
 	}
 
+	if c.value.authType == jira.AuthTypeCookie {
+		if err := c.configureCookie(); err != nil {
+			return "", err
+		}
+	}
+
 	if err := c.configureServerAndLoginDetails(); err != nil {
 		return "", err
 	}
@@ -229,10 +236,11 @@ func (c *JiraCLIConfigGenerator) configureLocalAuthType() error {
 	if c.usrCfg.AuthType == "" {
 		qs := &survey.Select{
 			Message: "Authentication type:",
-			Help: `Authentication type coud be: basic (login), bearer (PAT) or mtls (client certs)
+			Help: `Authentication type could be: basic (login), bearer (PAT), mtls (client certs), or cookie (browser session)
 ? If you are using your login credentials, the auth type is probably 'basic' (most common for local installation)
-? If you are using a personal access token, the auth type is probably 'bearer'`,
-			Options: []string{"basic", "bearer", "mtls"},
+? If you are using a personal access token, the auth type is probably 'bearer'
+? If your Jira uses SSO, reverse proxy, or client certificates, you may need 'cookie' auth`,
+			Options: []string{"basic", "bearer", "mtls", "cookie"},
 			Default: "basic",
 		}
 		if err := survey.AskOne(qs, &authType); err != nil {
@@ -245,6 +253,8 @@ func (c *JiraCLIConfigGenerator) configureLocalAuthType() error {
 		c.value.authType = jira.AuthTypeBearer
 	case jira.AuthTypeMTLS.String():
 		c.value.authType = jira.AuthTypeMTLS
+	case jira.AuthTypeCookie.String():
+		c.value.authType = jira.AuthTypeCookie
 	default:
 		c.value.authType = jira.AuthTypeBasic
 	}
@@ -301,14 +311,80 @@ func (c *JiraCLIConfigGenerator) configureMTLS() error {
 	return nil
 }
 
+func (c *JiraCLIConfigGenerator) configureCookie() error {
+	if c.value.server == "" {
+		var server string
+		prompt := &survey.Input{
+			Message: "Link to Jira server:",
+			Help:    "This is a link to your jira server, eg: https://company.atlassian.net",
+		}
+		if err := survey.AskOne(prompt, &server, survey.WithValidator(survey.Required)); err != nil {
+			return err
+		}
+		c.value.server = strings.TrimSpace(server)
+	}
+
+	fmt.Println("\nCookie-based authentication setup:")
+	fmt.Println("1. Open", c.value.server, "in a browser")
+	fmt.Println("2. Sign in (you may need to authenticate with SSO/certificate)")
+	fmt.Println("3. Open DevTools → Network and copy a working REST/XHR request's Cookie header")
+	fmt.Println("4. Paste the full Cookie header value (recommended) or at least JSESSIONID")
+	fmt.Println()
+
+	var sessionCookie string
+	prompt := &survey.Password{
+		Message: "Paste Cookie header or JSESSIONID value:",
+		Help:    "If Jira sits behind SSO or a load balancer, paste the full Cookie header value from a working request.",
+	}
+
+	if err := survey.AskOne(prompt, &sessionCookie, survey.WithValidator(survey.Required)); err != nil {
+		return err
+	}
+
+	sessionCookie = jira.NormalizeCookieToken(sessionCookie)
+
+	s := cmdutil.Info("Validating browser session...")
+	defer s.Stop()
+
+	client := jira.NewClient(jira.Config{
+		Server:   c.value.server,
+		APIToken: sessionCookie,
+		AuthType: &[]jira.AuthType{jira.AuthTypeCookie}[0],
+	})
+
+	_, _ = client.WarmupSession()
+
+	me, err := client.Me()
+	if err != nil {
+		s.Stop()
+		return fmt.Errorf("failed to validate cookie session: %w", err)
+	}
+
+	c.value.login = me.Login
+	s.Stop()
+
+	if err := keyring.Set("jira-cli", c.value.login, sessionCookie); err != nil {
+		return fmt.Errorf("failed to store session cookie in keychain: %w", err)
+	}
+
+	cmdutil.Success(fmt.Sprintf("Authenticated as %s (%s)", me.Name, me.Login))
+	cmdutil.Warn("Note: Browser-backed sessions expire. Run 'jira refresh' or 'jira session warmup' when needed.")
+
+	return nil
+}
+
 //nolint:gocyclo
 func (c *JiraCLIConfigGenerator) configureServerAndLoginDetails() error {
 	var qs []*survey.Question
 
-	c.value.server = c.usrCfg.Server
-	c.value.login = c.usrCfg.Login
+	if c.value.server == "" {
+		c.value.server = c.usrCfg.Server
+	}
+	if c.value.login == "" {
+		c.value.login = c.usrCfg.Login
+	}
 
-	if c.usrCfg.Server == "" {
+	if c.value.server == "" {
 		qs = append(qs, &survey.Question{
 			Name: "server",
 			Prompt: &survey.Input{
@@ -335,7 +411,7 @@ func (c *JiraCLIConfigGenerator) configureServerAndLoginDetails() error {
 		})
 	}
 
-	if c.usrCfg.Login == "" {
+	if c.usrCfg.Login == "" && c.value.authType != jira.AuthTypeCookie {
 		switch c.value.installation {
 		case jira.InstallationTypeCloud:
 			qs = append(qs, &survey.Question{
@@ -406,6 +482,10 @@ func (c *JiraCLIConfigGenerator) configureServerAndLoginDetails() error {
 		if ans.Login != "" {
 			c.value.login = strings.TrimSpace(ans.Login)
 		}
+	}
+
+	if c.value.authType == jira.AuthTypeCookie {
+		return nil
 	}
 
 	return c.verifyLoginDetails(c.value.server, c.value.login)

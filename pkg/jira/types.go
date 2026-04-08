@@ -11,10 +11,12 @@ const (
 	AuthTypeBearer AuthType = "bearer"
 	// AuthTypeMTLS is a mTLS auth.
 	AuthTypeMTLS AuthType = "mtls"
+	// AuthTypeCookie is a session cookie auth.
+	AuthTypeCookie AuthType = "cookie"
 )
 
 // AuthType is a jira authentication type.
-// Currently supports basic and bearer (PAT).
+// Supports basic, bearer (PAT), mtls, and cookie-based browser session auth.
 // Defaults to basic for empty or invalid value.
 type AuthType string
 

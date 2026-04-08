@@ -207,3 +207,130 @@ func TestDeleteV2(t *testing.T) {
 
 	_ = resp.Body.Close()
 }
+
+func TestGetWithCookieAuth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/rest/api/3/myself", r.URL.Path)
+
+		cookie, err := r.Cookie("JSESSIONID")
+		assert.NoError(t, err)
+		assert.Equal(t, "test-session-id", cookie.Value)
+		assert.Empty(t, r.Header.Get("Authorization"))
+
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+
+	authType := AuthTypeCookie
+	client := NewClient(Config{
+		Server:   server.URL,
+		APIToken: "test-session-id",
+		AuthType: &authType,
+	}, WithTimeout(3*time.Second))
+
+	resp, err := client.Get(context.Background(), "/myself", nil)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 200, resp.StatusCode)
+
+	_ = resp.Body.Close()
+}
+
+func TestGetWithCookieAuthEmptyToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := r.Cookie("JSESSIONID")
+		assert.Error(t, err)
+
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+
+	authType := AuthTypeCookie
+	client := NewClient(Config{
+		Server:   server.URL,
+		APIToken: "",
+		AuthType: &authType,
+	}, WithTimeout(3*time.Second))
+
+	resp, err := client.Get(context.Background(), "/myself", nil)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 200, resp.StatusCode)
+
+	_ = resp.Body.Close()
+}
+
+func TestGetWithRawCookieHeader(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/rest/api/3/myself", r.URL.Path)
+		assert.Equal(t, server.URL+"/", r.Header.Get("Referer"))
+		assert.Equal(t, browserUserAgent, r.Header.Get("User-Agent"))
+
+		cookie, err := r.Cookie("JSESSIONID")
+		assert.NoError(t, err)
+		assert.Equal(t, "test-session-id", cookie.Value)
+
+		lbCookie, err := r.Cookie("AWSALB")
+		assert.NoError(t, err)
+		assert.Equal(t, "test-alb", lbCookie.Value)
+
+		w.WriteHeader(200)
+	}))
+	defer server.Close()
+
+	authType := AuthTypeCookie
+	client := NewClient(Config{
+		Server:   server.URL,
+		APIToken: "Cookie: JSESSIONID=test-session-id; AWSALB=test-alb",
+		AuthType: &authType,
+	}, WithTimeout(3*time.Second))
+
+	resp, err := client.Get(context.Background(), "/myself", nil)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 200, resp.StatusCode)
+
+	_ = resp.Body.Close()
+}
+
+func TestGetWithCookieWarmupRetry(t *testing.T) {
+	issueAttempts := 0
+	serverInfoAttempts := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/api/2/serverInfo":
+			serverInfoAttempts++
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"version":"10.3.15","versionNumbers":[10,3,15],"deploymentType":"Server","buildNumber":10030015,"defaultLocale":{"locale":"en_US"}}`))
+		case "/rest/api/2/issue/TEST-1":
+			issueAttempts++
+			if issueAttempts == 1 {
+				w.WriteHeader(401)
+				return
+			}
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(`{"key":"TEST-1","fields":{"summary":"Warm issue"}}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer server.Close()
+
+	authType := AuthTypeCookie
+	client := NewClient(Config{
+		Server:   server.URL,
+		APIToken: "JSESSIONID=test-session-id; AWSALB=test-alb",
+		AuthType: &authType,
+	}, WithTimeout(3*time.Second))
+
+	resp, err := client.GetV2(context.Background(), "/issue/TEST-1", nil)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 200, resp.StatusCode)
+	assert.Equal(t, 2, issueAttempts)
+	assert.GreaterOrEqual(t, serverInfoAttempts, 1)
+
+	_ = resp.Body.Close()
+}
