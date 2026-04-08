@@ -39,6 +39,18 @@ func (c *Client) WarmupAgileSession(boardID int) error {
 	return err
 }
 
+// WarmupIssueSession refreshes browser-backed session state for an issue-centric flow.
+func (c *Client) WarmupIssueSession(key string) error {
+	if key == "" {
+		return nil
+	}
+
+	httpClient := &http.Client{Transport: c.transport, Jar: c.jar}
+	ctx := context.Background()
+
+	return c.warmupCookieSession(ctx, httpClient, c.server+"/browse/"+key)
+}
+
 func (c *Client) warmupServerSession(ctx context.Context, httpClient *http.Client, target string) (*ServerInfo, error) {
 	var lastErr error
 
@@ -63,9 +75,9 @@ func (c *Client) warmupCookieSession(ctx context.Context, httpClient *http.Clien
 	var lastErr error
 	success := false
 
-	for _, warmTarget := range c.cookieWarmupTargets(target) {
+	for _, step := range c.cookieWarmupTargets(target) {
 		for range cookieWarmupAttempts {
-			req, err := c.buildRequest(http.MethodGet, warmTarget, nil, nil)
+			req, err := c.buildRequest(http.MethodGet, step.URL, nil, step.Headers)
 			if err != nil {
 				lastErr = err
 				continue
@@ -83,7 +95,7 @@ func (c *Client) warmupCookieSession(ctx context.Context, httpClient *http.Clien
 				lastErr = err
 				continue
 			}
-			lastErr = fmt.Errorf("warmup target %s returned %s", warmTarget, res.Status)
+			lastErr = fmt.Errorf("warmup target %s returned %s", step.URL, res.Status)
 		}
 	}
 
@@ -94,18 +106,52 @@ func (c *Client) warmupCookieSession(ctx context.Context, httpClient *http.Clien
 	return lastErr
 }
 
-func (c *Client) cookieWarmupTargets(target string) []string {
-	targets := []string{c.server + "/"}
+type warmupTarget struct {
+	URL     string
+	Headers Header
+}
+
+func (c *Client) cookieWarmupTargets(target string) []warmupTarget {
+	targets := []warmupTarget{{URL: c.server + "/"}}
 
 	if key := issueKeyFromTarget(target); key != "" {
-		targets = append(targets, c.server+"/browse/"+key)
+		browseURL := c.server + "/browse/" + key
+		targets = append(targets,
+			warmupTarget{URL: browseURL},
+			warmupTarget{
+				URL: browseURL,
+				Headers: Header{
+					"Referer":          browseURL,
+					"X-Requested-With": "XMLHttpRequest",
+					"Accept":           "*/*",
+				},
+			},
+		)
 	}
 
 	if boardID := boardIDFromTarget(target); boardID != "" {
-		targets = append(targets, c.server+"/secure/RapidBoard.jspa?rapidView="+boardID+"&view=detail")
+		boardPage := c.server + "/secure/RapidBoard.jspa?rapidView=" + boardID + "&view=planning&issueLimit=100"
+		targets = append(targets,
+			warmupTarget{URL: boardPage},
+			warmupTarget{
+				URL: c.server + "/rest/greenhopper/1.0/xboard/plan/backlog/data.json?rapidViewId=" + boardID,
+				Headers: Header{
+					"Referer": boardPage,
+					"Accept":  "*/*",
+				},
+			},
+			warmupTarget{
+				URL: c.server + "/rest/greenhopper/1.0/sidebar/globalBoard?rapidViewId=" + boardID,
+				Headers: Header{
+					"Referer":          boardPage,
+					"Accept":           "*/*",
+					"X-Requested-With": "XMLHttpRequest",
+				},
+			},
+		)
 	}
 
-	targets = append(targets, c.server+baseURLv2+"/serverInfo")
+	targets = append(targets, warmupTarget{URL: c.server + baseURLv2 + "/serverInfo"})
 
 	return dedupeTargets(targets)
 }
@@ -158,18 +204,19 @@ func boardIDFromTarget(target string) string {
 	return rest
 }
 
-func dedupeTargets(targets []string) []string {
+func dedupeTargets(targets []warmupTarget) []warmupTarget {
 	seen := make(map[string]struct{}, len(targets))
-	out := make([]string, 0, len(targets))
+	out := make([]warmupTarget, 0, len(targets))
 
 	for _, target := range targets {
-		if target == "" {
+		if target.URL == "" {
 			continue
 		}
-		if _, ok := seen[target]; ok {
+		key := target.URL + "|" + target.Headers["Referer"] + "|" + target.Headers["X-Requested-With"]
+		if _, ok := seen[key]; ok {
 			continue
 		}
-		seen[target] = struct{}{}
+		seen[key] = struct{}{}
 		out = append(out, target)
 	}
 

@@ -321,6 +321,9 @@ func (c *Client) buildRequest(method, target string, body []byte, headers Header
 		if r.Header.Get("User-Agent") == "" {
 			r.Header.Set("User-Agent", browserUserAgent)
 		}
+		if r.Header.Get("Accept") == "" {
+			r.Header.Set("Accept", cookieAuthAccept(target))
+		}
 		if r.Header.Get("Referer") == "" {
 			r.Header.Set("Referer", cookieAuthReferer(c.server, target))
 		}
@@ -339,6 +342,19 @@ func (c *Client) buildRequest(method, target string, body []byte, headers Header
 	}
 
 	return r, nil
+}
+
+func cookieAuthAccept(target string) string {
+	u, err := url.Parse(target)
+	if err != nil {
+		return "*/*"
+	}
+
+	if strings.HasPrefix(u.Path, "/browse/") || strings.Contains(u.Path, "/RapidBoard.jspa") || u.Path == "/" {
+		return "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+	}
+
+	return "*/*"
 }
 
 func newCookieJar(server, token string) http.CookieJar {
@@ -413,6 +429,10 @@ func cookieAuthReferer(server, target string) string {
 		if key != "" {
 			return server + "/browse/" + key
 		}
+	}
+
+	if boardID := boardIDFromTarget(target); boardID != "" {
+		return server + "/secure/RapidBoard.jspa?rapidView=" + boardID + "&view=planning&issueLimit=100"
 	}
 
 	return server + "/"
