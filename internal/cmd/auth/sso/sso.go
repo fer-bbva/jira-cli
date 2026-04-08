@@ -17,7 +17,7 @@ import (
 
 // NewCmdSSO authenticates against Jira using the configured SSO flow.
 func NewCmdSSO() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "sso",
 		Short: "Sign in to Jira through SSO and store the resulting browser session",
 		Long: `Sign in to Jira through SSO and store the resulting browser session.
@@ -26,6 +26,10 @@ This command is intended for cookie-based authentication setups behind corporate
 It prompts for username and password, waits for second-factor approval, and stores the final Jira session in the keychain.`,
 		Run: authenticate,
 	}
+
+	cmd.Flags().Bool("no-playwright", false, "Skip Playwright CLI assisted browser login and use the legacy terminal/cURL flow")
+
+	return cmd
 }
 
 func authenticate(cmd *cobra.Command, _ []string) {
@@ -40,6 +44,18 @@ func authenticate(cmd *cobra.Command, _ []string) {
 	if server == "" {
 		cmdutil.Failed("Missing server in config. Run 'jira init --auth-type cookie' first.")
 		return
+	}
+
+	noPlaywright, err := cmd.Flags().GetBool("no-playwright")
+	cmdutil.ExitIfError(err)
+	if !noPlaywright && playwrightCLIAvailable() {
+		me, sessionCookie, err := authenticateViaPlaywright(server, configuredLogin(login))
+		if err == nil {
+			persistAuthenticatedSession(me, sessionCookie, login)
+			return
+		}
+		cmdutil.Warn("Playwright-assisted SSO failed: %s", err.Error())
+		cmdutil.Warn("Falling back to the legacy SSO flow...")
 	}
 
 	answers := struct {
@@ -99,7 +115,12 @@ func authenticate(cmd *cobra.Command, _ []string) {
 		s.Stop()
 	}
 
-	configuredLogin := strings.TrimSpace(login)
+	persistAuthenticatedSession(me, sessionCookie, login)
+}
+
+
+func persistAuthenticatedSession(me *jira.Me, sessionCookie, configured string) {
+	configuredLogin := strings.TrimSpace(configured)
 	if configuredLogin != "" && me.Login != configuredLogin {
 		cmdutil.Failed("SSO session belongs to user '%s' but config expects '%s'", me.Login, configuredLogin)
 		return
