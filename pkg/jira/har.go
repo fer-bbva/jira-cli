@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -104,8 +105,25 @@ func ExtractCookieTokenFromCurl(curlPath string) (string, error) {
 		return "", err
 	}
 
-	text := strings.ReplaceAll(string(data), "\\\n", " ")
+	return ExtractCookieTokenFromCurlText(string(data))
+}
+
+// ExtractCookieTokenFromCurlText extracts Cookie header from a copied cURL command text.
+func ExtractCookieTokenFromCurlText(text string) (string, error) {
+	text = strings.ReplaceAll(text, "\\\n", " ")
 	text = strings.ReplaceAll(text, "\\\r\n", " ")
+
+	flagPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?:^|\s)-b\s+'([^']+)'`),
+		regexp.MustCompile(`(?:^|\s)-b\s+"([^"]+)"`),
+		regexp.MustCompile(`(?:^|\s)--cookie\s+'([^']+)'`),
+		regexp.MustCompile(`(?:^|\s)--cookie\s+"([^"]+)"`),
+	}
+	for _, pattern := range flagPatterns {
+		if matches := pattern.FindStringSubmatch(text); len(matches) > 1 {
+			return NormalizeCookieToken(matches[1]), nil
+		}
+	}
 
 	markers := []string{"Cookie: ", "cookie: "}
 	for _, marker := range markers {

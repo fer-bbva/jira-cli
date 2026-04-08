@@ -90,3 +90,15 @@ func TestExtractCookieTokenFromCurl(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "JSESSIONID=good; AWSALB=fresh; AWSALBCORS=fresh2", cookie)
 }
+
+func TestExtractCookieTokenFromCurlText(t *testing.T) {
+	cookie, err := ExtractCookieTokenFromCurlText("curl 'https://jira.example.com' \\\n -H 'Cookie: JSESSIONID=good; AWSALB=fresh'")
+	require.NoError(t, err)
+	assert.Equal(t, "JSESSIONID=good; AWSALB=fresh", cookie)
+}
+
+func TestExtractCookieTokenFromCurlTextCookieFlag(t *testing.T) {
+	cookie, err := ExtractCookieTokenFromCurlText("curl 'https://jira.example.com/rest/wrm/2.0/resources' \\\n -H 'accept: */*' \\\n -b 'JSESSIONID=good; AWSALB=fresh; AWSALBCORS=fresh2'")
+	require.NoError(t, err)
+	assert.Equal(t, "JSESSIONID=good; AWSALB=fresh; AWSALBCORS=fresh2", cookie)
+}

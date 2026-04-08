@@ -5,10 +5,12 @@ import (
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/atotto/clipboard"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/zalando/go-keyring"
 
+	jiraBrowser "github.com/ankitpokhrel/jira-cli/pkg/browser"
 	"github.com/ankitpokhrel/jira-cli/internal/cmdutil"
 	"github.com/ankitpokhrel/jira-cli/pkg/jira"
 )
@@ -85,10 +87,17 @@ func authenticate(cmd *cobra.Command, _ []string) {
 	me, sessionCookie, err := client.AuthenticateSSO(strings.TrimSpace(answers.Username), answers.Password)
 	if err != nil {
 		s.Stop()
-		cmdutil.Failed("SSO login failed: %s", err.Error())
-		return
+		cmdutil.Warn("Terminal-driven SSO failed: %s", err.Error())
+		cmdutil.Warn("Falling back to browser-assisted SSO import...")
+
+		me, sessionCookie, err = authenticateViaBrowser(server, configuredLogin(login))
+		if err != nil {
+			cmdutil.Failed("SSO login failed: %s", err.Error())
+			return
+		}
+	} else {
+		s.Stop()
 	}
-	s.Stop()
 
 	configuredLogin := strings.TrimSpace(login)
 	if configuredLogin != "" && me.Login != configuredLogin {
@@ -108,4 +117,60 @@ func authenticate(cmd *cobra.Command, _ []string) {
 
 	cmdutil.Success("SSO login completed for %s (%s)", me.Name, me.Login)
 	cmdutil.Warn("Your browser-backed Jira session is now stored in the keychain. Run 'jira session warmup' if the first request still needs reheating.")
+}
+
+func authenticateViaBrowser(server, expectedLogin string) (*jira.Me, string, error) {
+	cmdutil.Warn("A browser window will open. Complete the BBVA login there, including second factor.")
+	if err := jiraBrowser.BrowseWithDevTools(server); err != nil {
+		return nil, "", fmt.Errorf("unable to open browser: %w", err)
+	}
+
+	var copied bool
+	confirm := &survey.Confirm{
+		Message: "After login, copy a Jira REST/XHR request as cURL to your clipboard. Ready to import it now?",
+		Default: true,
+	}
+	if err := survey.AskOne(confirm, &copied); err != nil {
+		return nil, "", err
+	}
+	if !copied {
+		return nil, "", fmt.Errorf("browser-assisted SSO cancelled before importing the session")
+	}
+
+	curlText, _ := clipboard.ReadAll()
+	sessionCookie, err := jira.ExtractCookieTokenFromCurlText(curlText)
+	if err != nil {
+		var pasted string
+		prompt := &survey.Password{
+			Message: "Paste the full 'Copy as cURL' request here:",
+			Help:    "Open DevTools in the logged-in browser, copy a working Jira REST/XHR request as cURL, and paste it here.",
+		}
+		if askErr := survey.AskOne(prompt, &pasted, survey.WithValidator(survey.Required)); askErr != nil {
+			return nil, "", askErr
+		}
+		sessionCookie, err = jira.ExtractCookieTokenFromCurlText(pasted)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to extract Cookie header from copied cURL: %w", err)
+		}
+	}
+
+	client := jira.NewClient(jira.Config{
+		Server:   server,
+		APIToken: sessionCookie,
+		AuthType: &[]jira.AuthType{jira.AuthTypeCookie}[0],
+	})
+	_, _ = client.WarmupSession()
+	me, err := client.Me()
+	if err != nil {
+		return nil, "", fmt.Errorf("imported browser session is not valid: %w", err)
+	}
+	if expectedLogin != "" && me.Login != expectedLogin {
+		return nil, "", fmt.Errorf("imported browser session belongs to '%s' but config expects '%s'", me.Login, expectedLogin)
+	}
+
+	return me, sessionCookie, nil
+}
+
+func configuredLogin(login string) string {
+	return strings.TrimSpace(login)
 }
