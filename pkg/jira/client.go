@@ -52,10 +52,36 @@ type ErrUnexpectedResponse struct {
 	Body       Errors
 	Status     string
 	StatusCode int
+	Username   string
+	LoginReason string
+	AuthRealm  string
 }
 
 func (e *ErrUnexpectedResponse) Error() string {
-	return e.Body.String()
+	msg := strings.TrimSpace(e.Body.String())
+	if msg != "" {
+		return msg
+	}
+
+	parts := []string{fmt.Sprintf("jira: unexpected response %d", e.StatusCode)}
+	if e.Status != "" {
+		parts[0] = fmt.Sprintf("jira: unexpected response %s", strings.TrimSpace(e.Status))
+	}
+	if e.Username != "" {
+		parts = append(parts, fmt.Sprintf("user=%s", e.Username))
+	}
+	if e.LoginReason != "" {
+		parts = append(parts, fmt.Sprintf("login_reason=%s", e.LoginReason))
+	}
+	if e.AuthRealm != "" {
+		parts = append(parts, fmt.Sprintf("auth=%s", e.AuthRealm))
+	}
+
+	if e.StatusCode == http.StatusUnauthorized && strings.EqualFold(e.Username, "anonymous") {
+		parts = append(parts, "browser session missing or expired")
+	}
+
+	return strings.Join(parts, " | ")
 }
 
 // ErrMultipleFailed represents a grouped error, usually when
@@ -466,5 +492,8 @@ func formatUnexpectedResponse(res *http.Response) *ErrUnexpectedResponse {
 		Body:       b,
 		Status:     res.Status,
 		StatusCode: res.StatusCode,
+		Username:   res.Header.Get("X-AUSERNAME"),
+		LoginReason: res.Header.Get("X-Seraph-LoginReason"),
+		AuthRealm:  res.Header.Get("WWW-Authenticate"),
 	}
 }

@@ -14,7 +14,7 @@ import (
 
 // NewCmdRefresh is a refresh command.
 func NewCmdRefresh() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "refresh",
 		Short: "Refresh browser session for cookie-based authentication",
 		Long: `Refresh browser session for cookie-based authentication.
@@ -23,6 +23,11 @@ This command is only applicable when using 'cookie' auth type.
 It allows you to update the browser session seed without re-running the full 'jira init' setup.`,
 		Run: refresh,
 	}
+
+	cmd.Flags().String("from-har", "", "Import the Cookie header automatically from an authenticated HAR file")
+	cmd.Flags().String("from-curl", "", "Import the Cookie header automatically from a copied cURL command file")
+
+	return cmd
 }
 
 func refresh(cmd *cobra.Command, _ []string) {
@@ -49,14 +54,44 @@ func refresh(cmd *cobra.Command, _ []string) {
 	fmt.Println()
 
 	var sessionCookie string
-	prompt := &survey.Password{
-		Message: "Paste Cookie header or JSESSIONID value:",
-		Help:    "If Jira sits behind SSO or a load balancer, paste the full Cookie header value from a working request.",
+	fromHAR, err := cmd.Flags().GetString("from-har")
+	cmdutil.ExitIfError(err)
+	fromCurl, err := cmd.Flags().GetString("from-curl")
+	cmdutil.ExitIfError(err)
+
+	if fromHAR != "" && fromCurl != "" {
+		cmdutil.Failed("Use only one of --from-har or --from-curl")
+		return
 	}
 
-	if err := survey.AskOne(prompt, &sessionCookie, survey.WithValidator(survey.Required)); err != nil {
-		cmdutil.Failed("Failed to read input: %s", err.Error())
-		return
+	if fromCurl != "" {
+		s := cmdutil.Info("Extracting browser session from cURL command...")
+		sessionCookie, err = jira.ExtractCookieTokenFromCurl(fromCurl)
+		s.Stop()
+		if err != nil {
+			cmdutil.Failed("Failed to extract Cookie header from cURL command: %s", err.Error())
+			return
+		}
+		cmdutil.Success("Imported Cookie header from cURL command: %s", fromCurl)
+	} else if fromHAR != "" {
+		s := cmdutil.Info("Extracting browser session from HAR...")
+		sessionCookie, err = jira.ExtractCookieTokenFromHAR(fromHAR, server)
+		s.Stop()
+		if err != nil {
+			cmdutil.Failed("Failed to extract Cookie header from HAR: %s\nTip: Chrome HAR exports may omit cookies; use --from-curl with a 'Copy as cURL' request instead.", err.Error())
+			return
+		}
+		cmdutil.Success("Imported Cookie header from HAR: %s", fromHAR)
+	} else {
+		prompt := &survey.Password{
+			Message: "Paste Cookie header or JSESSIONID value:",
+			Help:    "If Jira sits behind SSO or a load balancer, paste the full Cookie header value from a working request.",
+		}
+
+		if err := survey.AskOne(prompt, &sessionCookie, survey.WithValidator(survey.Required)); err != nil {
+			cmdutil.Failed("Failed to read input: %s", err.Error())
+			return
+		}
 	}
 
 	sessionCookie = jira.NormalizeCookieToken(sessionCookie)
