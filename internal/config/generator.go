@@ -25,10 +25,11 @@ const (
 	// FileType is a jira-cli config file extension.
 	FileType = "yml"
 
-	optionSearch = "[Search...]"
-	optionBack   = "Go-back"
-	optionNone   = "None"
-	lineBreak    = "----------"
+	optionSearch          = "[Search...]"
+	optionBack            = "Go-back"
+	optionNone            = "None"
+	lineBreak             = "----------"
+	defaultBBVAJiraServer = "https://jira.globaldevtools.bbva.com"
 )
 
 var (
@@ -182,6 +183,11 @@ func (c *JiraCLIConfigGenerator) Generate() (string, error) {
 	}
 
 	if c.value.installation == jira.InstallationTypeLocal {
+		if c.value.authType == jira.AuthTypeCookie {
+			if err := c.ensureCookieSessionReady(); err != nil {
+				return "", err
+			}
+		}
 		if err := c.configureServerMeta(c.value.server, c.value.login); err != nil {
 			return "", err
 		}
@@ -213,9 +219,9 @@ func (c *JiraCLIConfigGenerator) configureInstallationType() error {
 	default:
 		qs := &survey.Select{
 			Message: "Installation type:",
-			Help:    "Is this a cloud installation or an on-premise (local) installation.",
+			Help:    "Is this a cloud installation or an on-premise (local) installation. For BBVA Jira, the default is Local.",
 			Options: []string{"Cloud", "Local"},
-			Default: "Cloud",
+			Default: "Local",
 		}
 
 		var installation string
@@ -238,9 +244,10 @@ func (c *JiraCLIConfigGenerator) configureLocalAuthType() error {
 			Help: `Authentication type could be: basic (login), bearer (PAT), mtls (client certs), or cookie (browser session)
 ? If you are using your login credentials, the auth type is probably 'basic' (most common for local installation)
 ? If you are using a personal access token, the auth type is probably 'bearer'
-? If your Jira uses SSO, reverse proxy, or client certificates, you may need 'cookie' auth`,
+? If your Jira uses SSO, reverse proxy, or client certificates, you may need 'cookie' auth
+? For BBVA Jira, the default is 'cookie' because authentication is browser-backed through 'jira auth sso'`,
 			Options: []string{"basic", "bearer", "mtls", "cookie"},
-			Default: "basic",
+			Default: "cookie",
 		}
 		if err := survey.AskOne(qs, &authType); err != nil {
 			return err
@@ -311,7 +318,12 @@ func (c *JiraCLIConfigGenerator) configureMTLS() error {
 }
 
 func (c *JiraCLIConfigGenerator) configureCookie() error {
-	cmdutil.Warn("Cookie auth uses Playwright-backed SSO. After init, run 'jira auth sso'.")
+	if strings.TrimSpace(c.value.server) == "" {
+		c.value.server = defaultBBVAJiraServer
+	}
+	cmdutil.Warn("By default, BBVA Jira uses Local installation + cookie auth + Playwright-backed SSO.")
+	cmdutil.Warn("Server default: %s", c.value.server)
+	cmdutil.Warn("Run 'jira auth sso' first to create the browser-backed Jira session, then continue with 'jira init' to pick project and board defaults.")
 
 	return nil
 }
@@ -327,12 +339,16 @@ func (c *JiraCLIConfigGenerator) configureServerAndLoginDetails() error {
 		c.value.login = c.usrCfg.Login
 	}
 
+	if c.value.authType == jira.AuthTypeCookie && c.value.server == "" {
+		c.value.server = defaultBBVAJiraServer
+	}
+
 	if c.value.server == "" {
 		qs = append(qs, &survey.Question{
 			Name: "server",
 			Prompt: &survey.Input{
 				Message: "Link to Jira server:",
-				Help:    "This is a link to your jira server, eg: https://company.atlassian.net",
+				Help:    "This is a link to your jira server, eg: https://company.atlassian.net. For BBVA, use https://jira.globaldevtools.bbva.com",
 			},
 			Validate: func(val interface{}) error {
 				errInvalidURL := fmt.Errorf("not a valid URL")
@@ -354,7 +370,7 @@ func (c *JiraCLIConfigGenerator) configureServerAndLoginDetails() error {
 		})
 	}
 
-	if c.usrCfg.Login == "" {
+	if c.usrCfg.Login == "" && c.value.authType != jira.AuthTypeCookie {
 		switch c.value.installation {
 		case jira.InstallationTypeCloud:
 			qs = append(qs, &survey.Question{
@@ -432,6 +448,34 @@ func (c *JiraCLIConfigGenerator) configureServerAndLoginDetails() error {
 	}
 
 	return c.verifyLoginDetails(c.value.server, c.value.login)
+}
+
+func (c *JiraCLIConfigGenerator) ensureCookieSessionReady() error {
+	if strings.TrimSpace(c.value.server) == "" {
+		c.value.server = defaultBBVAJiraServer
+	}
+	if strings.TrimSpace(c.value.login) == "" {
+		return fmt.Errorf("cookie auth uses browser-backed SSO. Run 'jira auth sso' first so jira-cli can discover your Jira login, then rerun 'jira init'")
+	}
+
+	c.jiraClient = api.Client(jira.Config{
+		Server:   strings.TrimRight(c.value.server, "/"),
+		Login:    c.value.login,
+		Insecure: &c.usrCfg.Insecure,
+		AuthType: &c.value.authType,
+		Debug:    viper.GetBool("debug"),
+		MTLSConfig: jira.MTLSConfig{
+			CaCert:     c.value.mtls.caCert,
+			ClientCert: c.value.mtls.clientCert,
+			ClientKey:  c.value.mtls.clientKey,
+		},
+	})
+
+	if _, err := c.jiraClient.Me(); err != nil {
+		return fmt.Errorf("cookie auth requires an active browser-backed Jira session. Run 'jira auth sso' first, then rerun 'jira init': %w", err)
+	}
+
+	return nil
 }
 
 func (c *JiraCLIConfigGenerator) verifyLoginDetails(server, login string) error {

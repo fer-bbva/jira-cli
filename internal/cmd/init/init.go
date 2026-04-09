@@ -30,17 +30,17 @@ func NewCmdInit() *cobra.Command {
 	cmd := cobra.Command{
 		Use:     "init",
 		Short:   "Init initializes jira config",
-		Long:    "Init initializes jira configuration required for the tool to work properly.",
+		Long:    "Init initializes jira configuration required for the tool to work properly.\n\nFor the BBVA Jira setup, the default flow is: Local installation, cookie auth,\nserver https://jira.globaldevtools.bbva.com, then 'jira auth sso' for browser-backed login.",
 		Aliases: []string{"initialize", "configure", "config", "setup"},
 		Run:     initialize,
 	}
 
 	cmd.Flags().SortFlags = false
 
-	cmd.Flags().String("installation", "", "Is this a 'cloud' or 'local' jira installation?")
-	cmd.Flags().String("server", "", "Link to your jira server")
+	cmd.Flags().String("installation", "", "Is this a 'cloud' or 'local' jira installation? For BBVA, use 'local'.")
+	cmd.Flags().String("server", "", "Link to your jira server. For BBVA, the default is https://jira.globaldevtools.bbva.com")
 	cmd.Flags().String("login", "", "Jira login username or email based on your setup")
-	cmd.Flags().String("auth-type", "", "Authentication type can be basic, bearer, mtls or cookie")
+	cmd.Flags().String("auth-type", "", "Authentication type can be basic, bearer, mtls or cookie. For BBVA SSO, use cookie")
 	cmd.Flags().String("project", "", "Your default project key")
 	cmd.Flags().String("board", "", "Name of your default board in the project")
 	cmd.Flags().Bool("force", false, "Forcefully override existing config if it exists")
@@ -136,4 +136,7 @@ server's certificate chain and host name in requests to the jira server.`)
 	}
 
 	cmdutil.Success("Configuration generated: %s", file)
+	if strings.EqualFold(params.authType, jira.AuthTypeCookie.String()) || (params.authType == "" && strings.EqualFold(params.installation, jira.InstallationTypeLocal)) {
+		cmdutil.Warn("Next step: run 'jira auth sso' to create or refresh the browser-backed Jira session.")
+	}
 }
