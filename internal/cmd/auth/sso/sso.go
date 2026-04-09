@@ -21,7 +21,7 @@ func NewCmdSSO() *cobra.Command {
 		Long: `Sign in to Jira through SSO and store the resulting browser session.
 
 This command is intended for cookie-based authentication setups behind corporate SSO.
-	It uses Playwright to complete the browser login flow and stores the resulting Jira session in the keychain.`,
+It uses Playwright to complete the browser login flow and stores the resulting Jira session in the keychain.`,
 		Run: authenticate,
 	}
 
@@ -55,7 +55,7 @@ func authenticate(cmd *cobra.Command, _ []string) {
 
 	requirePlaywrightCLI("jira auth sso")
 
-	me, sessionCookie, err := authenticateViaPlaywright(server, configuredLogin(login))
+	me, sessionCookie, err := authenticateViaPlaywright(server, login)
 	if err != nil {
 		cmdutil.Failed("Playwright-assisted SSO failed: %s", err.Error())
 		return
@@ -81,7 +81,7 @@ func reauth(_ *cobra.Command, _ []string) {
 	server, login := cookieAuthContext()
 	requirePlaywrightCLI("jira auth reauth")
 
-	me, sessionCookie, err := authenticateViaPlaywright(server, configuredLogin(login))
+	me, sessionCookie, err := authenticateViaPlaywright(server, login)
 	if err != nil {
 		cmdutil.Failed("Playwright-assisted reauth failed: %s", err.Error())
 		return
@@ -107,7 +107,7 @@ func cookieAuthContext() (string, string) {
 		cmdutil.Failed("Missing server in config. Run 'jira init --auth-type cookie' first.")
 	}
 
-	login := configuredLogin(viper.GetString("login"))
+	login := strings.TrimSpace(viper.GetString("login"))
 	if login == "" {
 		cmdutil.Failed("Missing login in config for cookie auth. Run 'jira init --auth-type cookie' first.")
 	}
@@ -144,17 +144,12 @@ func storedSession(server, configured string) (*jira.Me, string, error) {
 
 func persistAuthenticatedSession(me *jira.Me, sessionCookie, configured string) {
 	configuredLogin := strings.TrimSpace(configured)
-	if configuredLogin != "" && me.Login != configuredLogin {
+	if me.Login != configuredLogin {
 		cmdutil.Failed("SSO session belongs to user '%s' but config expects '%s'", me.Login, configuredLogin)
 		return
 	}
 
-	keyringLogin := me.Login
-	if configuredLogin != "" {
-		keyringLogin = configuredLogin
-	}
-
-	if err := keyring.Set("jira-cli", keyringLogin, sessionCookie); err != nil {
+	if err := keyring.Set("jira-cli", configuredLogin, sessionCookie); err != nil {
 		cmdutil.Failed("Failed to store browser session in keychain: %s", err.Error())
 		return
 	}
@@ -170,8 +165,4 @@ func existingStoredSession(server, configured string) (*jira.Me, string, bool) {
 
 	cmdutil.Success("Existing Jira session is still valid for %s (%s)", me.Name, me.Login)
 	return me, sessionCookie, true
-}
-
-func configuredLogin(login string) string {
-	return strings.TrimSpace(login)
 }

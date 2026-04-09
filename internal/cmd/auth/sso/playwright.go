@@ -22,11 +22,10 @@ const (
 )
 
 type playwrightAuthResult struct {
-	Cookie    string   `json:"cookie"`
-	Reason    string   `json:"reason"`
-	PageURL   string   `json:"pageUrl"`
-	OpenPages []string `json:"openPages"`
-	Me        jira.Me  `json:"me"`
+	Cookie  string  `json:"cookie"`
+	Reason  string  `json:"reason"`
+	PageURL string  `json:"pageUrl"`
+	Me      jira.Me `json:"me"`
 }
 
 func playwrightCLIAvailable() bool {
@@ -291,7 +290,6 @@ func playwrightLoginDetectorScript(server string, timeout time.Duration) string 
 						cookie,
 						reason,
 						pageUrl: page.url(),
-						openPages: context.pages().map(current => current.url()).filter(Boolean),
 						me,
 					});
 				}
@@ -380,10 +378,6 @@ func playwrightCLICommand() ([]string, error) {
 		return []string{"npx", "--no-install", "playwright-cli"}, nil
 	}
 	return nil, fmt.Errorf("playwright-cli is not installed")
-}
-
-func runPlaywrightCLI(args ...string) (string, error) {
-	return runPlaywrightCLIInDir("", args...)
 }
 
 func runPlaywrightCLIInDir(dir string, args ...string) (string, error) {

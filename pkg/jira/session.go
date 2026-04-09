@@ -69,28 +69,6 @@ func (c *Client) cookieWarmupTargets(target string) []warmupTarget {
 		)
 	}
 
-	if boardID := boardIDFromTarget(target); boardID != "" {
-		boardPage := c.server + "/secure/RapidBoard.jspa?rapidView=" + boardID + "&view=planning&issueLimit=100"
-		targets = append(targets,
-			warmupTarget{URL: boardPage},
-			warmupTarget{
-				URL: c.server + "/rest/greenhopper/1.0/xboard/plan/backlog/data.json?rapidViewId=" + boardID,
-				Headers: Header{
-					"Referer": boardPage,
-					"Accept":  "*/*",
-				},
-			},
-			warmupTarget{
-				URL: c.server + "/rest/greenhopper/1.0/sidebar/globalBoard?rapidViewId=" + boardID,
-				Headers: Header{
-					"Referer":          boardPage,
-					"Accept":           "*/*",
-					"X-Requested-With": "XMLHttpRequest",
-				},
-			},
-		)
-	}
-
 	targets = append(targets, warmupTarget{URL: c.server + baseURLv2 + "/serverInfo"})
 
 	return dedupeTargets(targets)
