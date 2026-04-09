@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/AlecAivazis/survey/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/zalando/go-keyring"
@@ -16,6 +15,8 @@ import (
 	jiraConfig "github.com/ankitpokhrel/jira-cli/internal/config"
 	"github.com/ankitpokhrel/jira-cli/pkg/jira"
 )
+
+const defaultCookieSSOServer = "https://jira.globaldevtools.bbva.com"
 
 // NewCmdSSO authenticates against Jira using the configured SSO flow.
 func NewCmdSSO() *cobra.Command {
@@ -51,11 +52,13 @@ func NewCmdReauth() *cobra.Command {
 }
 
 func authenticate(cmd *cobra.Command, _ []string) {
-	server, login := cookieAuthContext()
+	server, login := cookieAuthContext(false)
 
-	if _, _, ok := existingStoredSession(server, login); ok {
-		persistCookieAuthConfig(server, login)
-		return
+	if login != "" {
+		if _, _, ok := existingStoredSession(server, login); ok {
+			persistCookieAuthConfig(server, login)
+			return
+		}
 	}
 
 	requirePlaywrightCLI("jira auth sso")
@@ -66,12 +69,17 @@ func authenticate(cmd *cobra.Command, _ []string) {
 		return
 	}
 
-	persistCookieAuthConfig(server, login)
-	persistAuthenticatedSession(me, sessionCookie, login)
+	resolvedLogin := login
+	if resolvedLogin == "" {
+		resolvedLogin = strings.TrimSpace(me.Login)
+	}
+
+	persistCookieAuthConfig(server, resolvedLogin)
+	persistAuthenticatedSession(me, sessionCookie, resolvedLogin)
 }
 
 func status(_ *cobra.Command, _ []string) {
-	server, login := cookieAuthContext()
+	server, login := cookieAuthContext(true)
 
 	me, _, err := storedSession(server, login)
 	if err != nil {
@@ -84,7 +92,7 @@ func status(_ *cobra.Command, _ []string) {
 }
 
 func reauth(_ *cobra.Command, _ []string) {
-	server, login := cookieAuthContext()
+	server, login := cookieAuthContext(false)
 	requirePlaywrightCLI("jira auth reauth")
 
 	me, sessionCookie, err := authenticateViaPlaywright(server, login)
@@ -93,8 +101,13 @@ func reauth(_ *cobra.Command, _ []string) {
 		return
 	}
 
-	persistCookieAuthConfig(server, login)
-	persistAuthenticatedSession(me, sessionCookie, login)
+	resolvedLogin := login
+	if resolvedLogin == "" {
+		resolvedLogin = strings.TrimSpace(me.Login)
+	}
+
+	persistCookieAuthConfig(server, resolvedLogin)
+	persistAuthenticatedSession(me, sessionCookie, resolvedLogin)
 }
 
 func requirePlaywrightCLI(command string) {
@@ -103,7 +116,7 @@ func requirePlaywrightCLI(command string) {
 	}
 }
 
-func cookieAuthContext() (string, string) {
+func cookieAuthContext(requireLogin bool) (string, string) {
 	authType := viper.GetString("auth_type")
 	if authType != "" && authType != string(jira.AuthTypeCookie) {
 		cmdutil.Warn("Config auth_type=%s will be updated to cookie for browser-backed SSO.", authType)
@@ -112,74 +125,16 @@ func cookieAuthContext() (string, string) {
 	server := strings.TrimSpace(viper.GetString("server"))
 	login := strings.TrimSpace(viper.GetString("login"))
 
-	var err error
-	server, login, err = promptCookieAuthBootstrap(server, login)
-	if err != nil {
-		cmdutil.Failed("Failed to read cookie auth settings: %s", err.Error())
+	if server == "" {
+		server = defaultCookieSSOServer
+		cmdutil.Warn("Using default Jira server for SSO: %s", server)
+	}
+
+	if requireLogin && login == "" {
+		cmdutil.Failed("Missing login in jira config. Run 'jira auth sso' once to bootstrap browser-backed SSO.")
 	}
 
 	return server, login
-}
-
-func promptCookieAuthBootstrap(server, login string) (string, string, error) {
-	questions := make([]*survey.Question, 0, 2)
-
-	if strings.TrimSpace(server) == "" {
-		questions = append(questions, &survey.Question{
-			Name: "server",
-			Prompt: &survey.Input{
-				Message: "Link to Jira server:",
-				Help:    "This is the Jira base URL, for example https://jira.globaldevtools.bbva.com.",
-			},
-			Validate: func(val interface{}) error {
-				str, ok := val.(string)
-				if !ok || strings.TrimSpace(str) == "" {
-					return fmt.Errorf("not a valid URL")
-				}
-				parsed, err := url.Parse(strings.TrimSpace(str))
-				if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-					return fmt.Errorf("not a valid URL")
-				}
-				if parsed.Scheme != "http" && parsed.Scheme != "https" {
-					return fmt.Errorf("not a valid URL")
-				}
-				return nil
-			},
-		})
-	}
-
-	if strings.TrimSpace(login) == "" {
-		questions = append(questions, &survey.Question{
-			Name: "login",
-			Prompt: &survey.Input{
-				Message: "Jira login username:",
-				Help:    "This is the login that jira-cli will use to find the browser-backed session in the keychain.",
-			},
-			Validate: survey.Required,
-		})
-	}
-
-	if len(questions) == 0 {
-		return strings.TrimSpace(server), strings.TrimSpace(login), nil
-	}
-
-	answers := struct {
-		Server string
-		Login  string
-	}{}
-
-	if err := survey.Ask(questions, &answers); err != nil {
-		return "", "", err
-	}
-
-	if strings.TrimSpace(server) == "" {
-		server = answers.Server
-	}
-	if strings.TrimSpace(login) == "" {
-		login = answers.Login
-	}
-
-	return strings.TrimSpace(server), strings.TrimSpace(login), nil
 }
 
 func persistCookieAuthConfig(server, login string) {

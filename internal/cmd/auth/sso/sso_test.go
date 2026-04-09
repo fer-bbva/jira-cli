@@ -1,6 +1,10 @@
 package sso
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/spf13/viper"
+)
 
 func TestNormalizeConfigPath(t *testing.T) {
 	tests := []struct {
@@ -39,5 +43,23 @@ func TestInferInstallationFromServer(t *testing.T) {
 				t.Fatalf("inferInstallationFromServer(%q) = %q, want %q", tt.server, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCookieAuthContextUsesDefaultServer(t *testing.T) {
+	t.Setenv("JIRA_SERVER", "")
+	t.Setenv("JIRA_LOGIN", "")
+
+	viper.Reset()
+	viper.Set("server", "")
+	viper.Set("login", "")
+	viper.Set("auth_type", "")
+
+	server, login := cookieAuthContext(false)
+	if server != defaultCookieSSOServer {
+		t.Fatalf("cookieAuthContext(false) server = %q, want %q", server, defaultCookieSSOServer)
+	}
+	if login != "" {
+		t.Fatalf("cookieAuthContext(false) login = %q, want empty", login)
 	}
 }

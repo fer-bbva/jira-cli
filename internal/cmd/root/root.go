@@ -85,14 +85,14 @@ func NewCmdRoot() *cobra.Command {
 				return
 			}
 
+			configFile := viper.ConfigFileUsed()
+			if !jiraConfig.Exists(configFile) {
+				cmdutil.Failed("Missing configuration file.\nRun 'jira auth sso' to bootstrap browser-backed SSO or 'jira init' to configure the tool.")
+			}
+
 			authType := viper.GetString("auth_type")
 			if authType != string(jira.AuthTypeMTLS) && authType != string(jira.AuthTypeCookie) {
 				checkForJiraToken(viper.GetString("server"), viper.GetString("login"))
-			}
-
-			configFile := viper.ConfigFileUsed()
-			if !jiraConfig.Exists(configFile) {
-				cmdutil.Failed("Missing configuration file.\nRun 'jira init' to configure the tool.")
 			}
 		},
 	}
@@ -178,6 +178,8 @@ func checkForJiraToken(server string, login string) {
 	}
 
 	msg := fmt.Sprintf(`The tool needs a Jira API token to function.
+
+If your Jira uses browser-backed SSO, run: jira auth sso
 
 For cloud server: you can generate the token using this link: %s
 For local server: you can use the password you use to log in to Jira for basic auth or get a token from your Jira profile for PAT.
