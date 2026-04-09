@@ -2,7 +2,9 @@ package sso
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,9 +18,16 @@ import (
 const playwrightSessionName = "jira"
 
 const (
-	playwrightLoginTimeout  = 5 * time.Minute
-	playwrightPollInterval  = 1 * time.Second
+	playwrightLoginTimeout = 5 * time.Minute
 )
+
+type playwrightAuthResult struct {
+	Cookie    string   `json:"cookie"`
+	Reason    string   `json:"reason"`
+	PageURL   string   `json:"pageUrl"`
+	OpenPages []string `json:"openPages"`
+	Me        jira.Me  `json:"me"`
+}
 
 func playwrightCLIAvailable() bool {
 	_, err := playwrightCLICommand()
@@ -34,10 +43,6 @@ func authenticateViaPlaywright(server, expectedLogin string) (*jira.Me, string, 
 	if err != nil {
 		return nil, "", err
 	}
-	statePath, err := playwrightStatePath(workspaceDir)
-	if err != nil {
-		return nil, "", err
-	}
 
 	cmdutil.Warn("Playwright CLI detected. Opening an isolated Jira browser session for interactive SSO login.")
 	cmdutil.Warn("Complete the BBVA login there, including the mobile second factor. I will detect the Jira session automatically.")
@@ -49,19 +54,35 @@ func authenticateViaPlaywright(server, expectedLogin string) (*jira.Me, string, 
 		return nil, "", fmt.Errorf("unable to open Playwright browser session: %w", err)
 	}
 
-	if err := waitForPlaywrightAuthenticatedSession(workspaceDir, server); err != nil {
-		return nil, "", err
-	}
-
-	me, sessionCookie, err := tryImportPlaywrightState(workspaceDir, server, expectedLogin, statePath)
+	result, err := waitForPlaywrightAuthenticatedSession(workspaceDir, server)
 	if err != nil {
 		return nil, "", err
 	}
 
-	return me, sessionCookie, nil
+	sessionCookie := jira.NormalizeCookieToken(result.Cookie)
+	if sessionCookie == "" {
+		return nil, "", fmt.Errorf("playwright-assisted SSO succeeded but did not return Jira cookies")
+	}
+	if result.Me.Login == "" {
+		return nil, "", fmt.Errorf("playwright-assisted SSO succeeded but did not return Jira user info")
+	}
+	if expectedLogin != "" && result.Me.Login != expectedLogin {
+		return nil, "", fmt.Errorf("playwright-assisted browser session belongs to '%s' but config expects '%s'", result.Me.Login, expectedLogin)
+	}
+
+	if result.Reason != "" {
+		if result.PageURL != "" {
+			cmdutil.Success("Playwright detected Jira session via %s (%s)", result.Reason, result.PageURL)
+		} else {
+			cmdutil.Success("Playwright detected Jira session via %s", result.Reason)
+		}
+	}
+
+	me := result.Me
+	return &me, sessionCookie, nil
 }
 
-func waitForPlaywrightAuthenticatedSession(workspaceDir, server string) error {
+func waitForPlaywrightAuthenticatedSession(workspaceDir, server string) (*playwrightAuthResult, error) {
 	output, err := runPlaywrightCLIInDir(
 		workspaceDir,
 		"-s="+playwrightSessionName,
@@ -71,39 +92,89 @@ func waitForPlaywrightAuthenticatedSession(workspaceDir, server string) error {
 	)
 	if err != nil {
 		if strings.TrimSpace(output) != "" {
-			return fmt.Errorf("playwright-assisted SSO timed out waiting for a valid Jira session: %s", strings.TrimSpace(output))
+			return nil, fmt.Errorf("playwright-assisted SSO failed while waiting for a valid Jira session: %s", strings.TrimSpace(output))
 		}
-		return fmt.Errorf("playwright-assisted SSO timed out waiting for a valid Jira session: %w", err)
+		return nil, fmt.Errorf("playwright-assisted SSO failed while waiting for a valid Jira session: %w", err)
 	}
 
-	return nil
+	result, err := parsePlaywrightAuthResult(output)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse Playwright-authenticated Jira session: %w | output=%s", err, summarizePlaywrightOutput(output))
+	}
+
+	return result, nil
 }
 
-func tryImportPlaywrightState(workspaceDir, server, expectedLogin, statePath string) (*jira.Me, string, error) {
-
-	if _, err := runPlaywrightCLIInDir(workspaceDir, "-s="+playwrightSessionName, "state-save", statePath); err != nil {
-		return nil, "", fmt.Errorf("unable to save Playwright browser state: %w", err)
+func parsePlaywrightAuthResult(output string) (*playwrightAuthResult, error) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty output")
 	}
 
-	sessionCookie, err := jira.ExtractCookieTokenFromStorageStateFile(statePath, server)
-	if err != nil {
-		return nil, "", fmt.Errorf("unable to extract Jira cookies from Playwright state: %w", err)
+	for _, candidate := range playwrightAuthResultCandidates(trimmed) {
+		var result playwrightAuthResult
+		if err := json.Unmarshal([]byte(candidate), &result); err != nil {
+			continue
+		}
+		if strings.TrimSpace(result.Cookie) == "" {
+			continue
+		}
+		if strings.TrimSpace(result.Me.Login) == "" {
+			continue
+		}
+
+		return &result, nil
 	}
 
-	client := jira.NewClient(jira.Config{
-		Server:   server,
-		APIToken: sessionCookie,
-		AuthType: &[]jira.AuthType{jira.AuthTypeCookie}[0],
-	})
-	me, err := client.Me()
-	if err != nil {
-		return nil, "", fmt.Errorf("playwright-imported browser session is not valid: %w", err)
-	}
-	if expectedLogin != "" && me.Login != expectedLogin {
-		return nil, "", fmt.Errorf("playwright-imported browser session belongs to '%s' but config expects '%s'", me.Login, expectedLogin)
+	return nil, fmt.Errorf("no valid auth payload found in output")
+}
+
+func playwrightAuthResultCandidates(output string) []string {
+	candidates := []string{output}
+
+	var unquoted string
+	if err := json.Unmarshal([]byte(output), &unquoted); err == nil && strings.TrimSpace(unquoted) != "" {
+		candidates = append(candidates, strings.TrimSpace(unquoted))
 	}
 
-	return me, sessionCookie, nil
+	if start := strings.Index(output, "{"); start != -1 {
+		if end := strings.LastIndex(output, "}"); end > start {
+			candidates = append(candidates, strings.TrimSpace(output[start:end+1]))
+		}
+	}
+
+	if len(candidates) == 1 {
+		return candidates
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	unique := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		unique = append(unique, candidate)
+	}
+
+	return unique
+}
+
+func summarizePlaywrightOutput(output string) string {
+	trimmed := strings.TrimSpace(output)
+	trimmed = strings.ReplaceAll(trimmed, "\n", " ")
+	trimmed = strings.ReplaceAll(trimmed, "\r", " ")
+	trimmed = strings.Join(strings.Fields(trimmed), " ")
+	if trimmed == "" {
+		return `""`
+	}
+	if len(trimmed) > 240 {
+		trimmed = trimmed[:240] + "..."
+	}
+	return fmt.Sprintf("%q", trimmed)
 }
 
 func playwrightWorkspaceDir() (string, error) {
@@ -130,22 +201,20 @@ func playwrightProfileDir() (string, error) {
 	return path, nil
 }
 
-func playwrightStatePath(workspaceDir string) (string, error) {
-	path := filepath.Join(workspaceDir, ".playwright-cli", "jira-auth-state.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", fmt.Errorf("unable to create Playwright state dir: %w", err)
-	}
-	return path, nil
-}
-
 func closePlaywrightSession(workspaceDir string) error {
 	_, err := runPlaywrightCLIInDir(workspaceDir, "-s="+playwrightSessionName, "close")
 	return err
 }
 
 func playwrightLoginDetectorScript(server string, timeout time.Duration) string {
+	serverOrigin := strings.TrimRight(server, "/")
+	if parsedServer, err := url.Parse(server); err == nil && parsedServer.Scheme != "" && parsedServer.Host != "" {
+		serverOrigin = parsedServer.Scheme + "://" + parsedServer.Host
+	}
+
 	return fmt.Sprintf(`async page => {
-	const serverOrigin = new URL(%q).origin;
+	const serverOrigin = %q;
+	const serverURL = %q;
 	const context = page.context();
 	const timeoutMs = %d;
 	const attachedPages = new Set();
@@ -154,11 +223,15 @@ func playwrightLoginDetectorScript(server string, timeout time.Duration) string 
 	let validating = false;
 
 	const isServerURL = value => {
-		try {
-			return new URL(value).origin === serverOrigin;
-		} catch {
-			return false;
+		return typeof value === 'string' && value.startsWith(serverOrigin);
+	};
+
+	const pathOf = value => {
+		if (!isServerURL(value)) {
+			return '';
 		}
+		const rest = value.slice(serverOrigin.length);
+		return rest === '' ? '/' : rest;
 	};
 
 	const isInterestingResponse = response => {
@@ -175,11 +248,11 @@ func playwrightLoginDetectorScript(server string, timeout time.Duration) string 
 			return false;
 		}
 
-		const pathname = new URL(response.url()).pathname;
+		const pathname = pathOf(response.url());
 		return pathname === '/' || pathname.startsWith('/browse/') || pathname.startsWith('/secure/') || pathname.startsWith('/rest/');
 	};
 
-	const done = await new Promise((resolve, reject) => {
+	const donePromise = new Promise((resolve, reject) => {
 		const finish = (fn, value) => {
 			if (settled) {
 				return;
@@ -203,7 +276,24 @@ func playwrightLoginDetectorScript(server string, timeout time.Duration) string 
 			try {
 				const response = await context.request.get(serverOrigin + '/rest/api/2/myself', { timeout: 5000 });
 				if (response.status() < 400) {
-					finish(resolve, reason);
+					const me = await response.json();
+					const cookies = await context.cookies([serverURL]);
+					const cookie = cookies
+						.filter(current => current.name && current.value)
+						.sort((left, right) => left.name.localeCompare(right.name))
+						.map(current => current.name + '=' + current.value)
+						.join('; ');
+					if (!cookie || !me || !me.name) {
+						return;
+					}
+
+					finish(resolve, {
+						cookie,
+						reason,
+						pageUrl: page.url(),
+						openPages: context.pages().map(current => current.url()).filter(Boolean),
+						me,
+					});
 				}
 			} catch {
 				// Session is not ready yet.
@@ -264,14 +354,19 @@ func playwrightLoginDetectorScript(server string, timeout time.Duration) string 
 		cleanup.push(() => context.removeListener('response', onResponse));
 		cleanup.push(() => page.removeListener('close', onClose));
 
-		const timer = setTimeout(() => finish(reject, new Error('timeout waiting for Jira authentication to complete')), timeoutMs);
-		cleanup.push(() => clearTimeout(timer));
-
 		void validate('initial');
 	});
 
+	const done = await Promise.race([
+		donePromise,
+		page.waitForTimeout(timeoutMs).then(() => {
+			throw new Error('timeout waiting for Jira authentication to complete');
+		}),
+	]);
+
 	return done;
 }`,
+		serverOrigin,
 		server,
 		timeout.Milliseconds(),
 	)
