@@ -10,11 +10,15 @@ import (
 func NewCmdAuth() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
-		Short: "Authenticate and refresh Jira sessions",
-		Long:  "Authenticate and refresh Jira sessions, especially for browser-backed SSO setups.",
+		Short: "Authenticate and inspect Jira browser sessions",
+		Long:  "Authenticate and inspect Jira browser-backed SSO sessions.",
 	}
 
-	cmd.AddCommand(sso.NewCmdSSO())
+	cmd.AddCommand(
+		sso.NewCmdSSO(),
+		sso.NewCmdStatus(),
+		sso.NewCmdReauth(),
+	)
 
 	return cmd
 }

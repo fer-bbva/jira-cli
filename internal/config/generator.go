@@ -11,7 +11,6 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/AlecAivazis/survey/v2/core"
 	"github.com/spf13/viper"
-	"github.com/zalando/go-keyring"
 
 	"github.com/ankitpokhrel/jira-cli/api"
 	"github.com/ankitpokhrel/jira-cli/internal/cmdutil"
@@ -312,63 +311,8 @@ func (c *JiraCLIConfigGenerator) configureMTLS() error {
 }
 
 func (c *JiraCLIConfigGenerator) configureCookie() error {
-	if c.value.server == "" {
-		var server string
-		prompt := &survey.Input{
-			Message: "Link to Jira server:",
-			Help:    "This is a link to your jira server, eg: https://company.atlassian.net",
-		}
-		if err := survey.AskOne(prompt, &server, survey.WithValidator(survey.Required)); err != nil {
-			return err
-		}
-		c.value.server = strings.TrimSpace(server)
-	}
-
-	fmt.Println("\nCookie-based authentication setup:")
-	fmt.Println("1. Open", c.value.server, "in a browser")
-	fmt.Println("2. Sign in (you may need to authenticate with SSO/certificate)")
-	fmt.Println("3. Open DevTools → Network and copy a working REST/XHR request's Cookie header")
-	fmt.Println("4. Paste the full Cookie header value (recommended) or at least JSESSIONID")
-	fmt.Println()
-
-	var sessionCookie string
-	prompt := &survey.Password{
-		Message: "Paste Cookie header or JSESSIONID value:",
-		Help:    "If Jira sits behind SSO or a load balancer, paste the full Cookie header value from a working request.",
-	}
-
-	if err := survey.AskOne(prompt, &sessionCookie, survey.WithValidator(survey.Required)); err != nil {
-		return err
-	}
-
-	sessionCookie = jira.NormalizeCookieToken(sessionCookie)
-
-	s := cmdutil.Info("Validating browser session...")
-	defer s.Stop()
-
-	client := jira.NewClient(jira.Config{
-		Server:   c.value.server,
-		APIToken: sessionCookie,
-		AuthType: &[]jira.AuthType{jira.AuthTypeCookie}[0],
-	})
-
-	_, _ = client.WarmupSession()
-
-	me, err := client.Me()
-	if err != nil {
-		s.Stop()
-		return fmt.Errorf("failed to validate cookie session: %w", err)
-	}
-
-	c.value.login = me.Login
-	s.Stop()
-
-	if err := keyring.Set("jira-cli", c.value.login, sessionCookie); err != nil {
-		return fmt.Errorf("failed to store session cookie in keychain: %w", err)
-	}
-
-	cmdutil.Success(fmt.Sprintf("Authenticated as %s (%s)", me.Name, me.Login))
-	cmdutil.Warn("Note: Browser-backed sessions expire. Run 'jira refresh' or 'jira session warmup' when needed.")
+	cmdutil.Warn("Cookie auth now uses browser-backed SSO via Playwright.")
+	cmdutil.Warn("This init flow will only write config. After init, run 'jira auth sso' to create the session and 'jira auth reauth' to renew it later.")
 
 	return nil
 }
@@ -411,7 +355,7 @@ func (c *JiraCLIConfigGenerator) configureServerAndLoginDetails() error {
 		})
 	}
 
-	if c.usrCfg.Login == "" && c.value.authType != jira.AuthTypeCookie {
+	if c.usrCfg.Login == "" {
 		switch c.value.installation {
 		case jira.InstallationTypeCloud:
 			qs = append(qs, &survey.Question{
@@ -447,7 +391,7 @@ func (c *JiraCLIConfigGenerator) configureServerAndLoginDetails() error {
 				Name: "login",
 				Prompt: &survey.Input{
 					Message: "Login username:",
-					Help:    "This is the username you use to login to your jira account.",
+					Help:    "This is the username that jira-cli will use to look up the browser-backed session in your keychain.",
 				},
 				Validate: func(val interface{}) error {
 					errInvalidUser := fmt.Errorf("not a valid user")

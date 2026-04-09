@@ -2,15 +2,13 @@ package sso
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
-	"github.com/AlecAivazis/survey/v2"
-	"github.com/atotto/clipboard"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/zalando/go-keyring"
 
-	jiraBrowser "github.com/ankitpokhrel/jira-cli/pkg/browser"
 	"github.com/ankitpokhrel/jira-cli/internal/cmdutil"
 	"github.com/ankitpokhrel/jira-cli/pkg/jira"
 )
@@ -23,106 +21,126 @@ func NewCmdSSO() *cobra.Command {
 		Long: `Sign in to Jira through SSO and store the resulting browser session.
 
 This command is intended for cookie-based authentication setups behind corporate SSO.
-It prompts for username and password, waits for second-factor approval, and stores the final Jira session in the keychain.`,
+	It uses Playwright to complete the browser login flow and stores the resulting Jira session in the keychain.`,
 		Run: authenticate,
 	}
-
-	cmd.Flags().Bool("no-playwright", false, "Skip Playwright CLI assisted browser login and use the legacy terminal/cURL flow")
 
 	return cmd
 }
 
+func NewCmdStatus() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show the status of the stored Jira browser session",
+		Long:  "Show whether the Jira browser-backed SSO session stored in the keychain is still valid.",
+		Run:   status,
+	}
+}
+
+func NewCmdReauth() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reauth",
+		Short: "Force a fresh Jira SSO login with Playwright",
+		Long:  "Force a fresh Jira SSO login with Playwright and replace the stored browser-backed session.",
+		Run:   reauth,
+	}
+}
+
 func authenticate(cmd *cobra.Command, _ []string) {
-	authType := viper.GetString("auth_type")
-	if authType != string(jira.AuthTypeCookie) {
-		cmdutil.Failed("jira auth sso requires auth_type=cookie in your config (current auth_type: %s)", authType)
+	server, login := cookieAuthContext()
+
+	if _, _, ok := existingStoredSession(server, login); ok {
 		return
 	}
 
-	server := viper.GetString("server")
-	login := strings.TrimSpace(viper.GetString("login"))
-	if server == "" {
-		cmdutil.Failed("Missing server in config. Run 'jira init --auth-type cookie' first.")
-		return
-	}
+	requirePlaywrightCLI("jira auth sso")
 
-	if me, sessionCookie, ok := existingStoredSession(server, login); ok {
-		persistAuthenticatedSession(me, sessionCookie, login)
-		return
-	}
-
-	noPlaywright, err := cmd.Flags().GetBool("no-playwright")
-	cmdutil.ExitIfError(err)
-	if !noPlaywright && playwrightCLIAvailable() {
-		me, sessionCookie, err := authenticateViaPlaywright(server, configuredLogin(login))
-		if err == nil {
-			persistAuthenticatedSession(me, sessionCookie, login)
-			return
-		}
-		cmdutil.Warn("Playwright-assisted SSO failed: %s", err.Error())
-		cmdutil.Warn("Falling back to the legacy SSO flow...")
-	}
-
-	answers := struct {
-		Username string
-		Password string
-	}{}
-
-	questions := []*survey.Question{
-		{
-			Name: "username",
-			Prompt: &survey.Input{
-				Message: "SSO username:",
-				Default: login,
-				Help:    "Corporate username used in the BBVA IdP login form.",
-			},
-			Validate: survey.Required,
-		},
-		{
-			Name: "password",
-			Prompt: &survey.Password{
-				Message: "SSO password:",
-				Help:    "Your corporate password. It is only used for the live SSO request and is not stored.",
-			},
-			Validate: survey.Required,
-		},
-	}
-
-	if err := survey.Ask(questions, &answers); err != nil {
-		cmdutil.Failed("Failed to read SSO credentials: %s", err.Error())
-		return
-	}
-
-	client := jira.NewClient(jira.Config{
-		Server:   server,
-		Login:    login,
-		AuthType: &[]jira.AuthType{jira.AuthTypeCookie}[0],
-		Insecure: &[]bool{viper.GetBool("insecure")}[0],
-		Debug:    viper.GetBool("debug"),
-	})
-
-	fmt.Println("Starting SSO login for", server)
-	cmdutil.Warn("Approve the BBVA authentication request on your work phone when it appears.")
-
-	s := cmdutil.Info("Completing SSO login...")
-	me, sessionCookie, err := client.AuthenticateSSO(strings.TrimSpace(answers.Username), answers.Password)
+	me, sessionCookie, err := authenticateViaPlaywright(server, configuredLogin(login))
 	if err != nil {
-		s.Stop()
-		cmdutil.Warn("Terminal-driven SSO failed: %s", err.Error())
-		cmdutil.Warn("Falling back to browser-assisted SSO import...")
-
-		me, sessionCookie, err = authenticateViaBrowser(server, configuredLogin(login))
-		if err != nil {
-			cmdutil.Failed("SSO login failed: %s", err.Error())
-			return
-		}
-	} else {
-		s.Stop()
+		cmdutil.Failed("Playwright-assisted SSO failed: %s", err.Error())
+		return
 	}
 
 	persistAuthenticatedSession(me, sessionCookie, login)
 }
 
+func status(_ *cobra.Command, _ []string) {
+	server, login := cookieAuthContext()
+
+	me, _, err := storedSession(server, login)
+	if err != nil {
+		cmdutil.Failed("Stored Jira session is not ready: %s", err.Error())
+		return
+	}
+
+	cmdutil.Success("Stored Jira session is valid for %s (%s)", me.Name, me.Login)
+	_, _ = fmt.Fprintf(os.Stdout, "server: %s\nlogin: %s\nsource: keychain\nplaywright: %t\n", server, login, playwrightCLIAvailable())
+}
+
+func reauth(_ *cobra.Command, _ []string) {
+	server, login := cookieAuthContext()
+	requirePlaywrightCLI("jira auth reauth")
+
+	me, sessionCookie, err := authenticateViaPlaywright(server, configuredLogin(login))
+	if err != nil {
+		cmdutil.Failed("Playwright-assisted reauth failed: %s", err.Error())
+		return
+	}
+
+	persistAuthenticatedSession(me, sessionCookie, login)
+}
+
+func requirePlaywrightCLI(command string) {
+	if _, err := playwrightCLICommand(); err != nil {
+		cmdutil.Failed("%s requires Playwright CLI: %s", command, err.Error())
+	}
+}
+
+func cookieAuthContext() (string, string) {
+	authType := viper.GetString("auth_type")
+	if authType != string(jira.AuthTypeCookie) {
+		cmdutil.Failed("This command requires auth_type=cookie in your config (current auth_type: %s)", authType)
+	}
+
+	server := strings.TrimSpace(viper.GetString("server"))
+	if server == "" {
+		cmdutil.Failed("Missing server in config. Run 'jira init --auth-type cookie' first.")
+	}
+
+	login := configuredLogin(viper.GetString("login"))
+	if login == "" {
+		cmdutil.Failed("Missing login in config for cookie auth. Run 'jira init --auth-type cookie' first.")
+	}
+
+	return server, login
+}
+
+func storedSession(server, configured string) (*jira.Me, string, error) {
+	configuredLogin := strings.TrimSpace(configured)
+	if configuredLogin == "" {
+		return nil, "", fmt.Errorf("missing login in config")
+	}
+
+	sessionCookie, err := keyring.Get("jira-cli", configuredLogin)
+	if err != nil || strings.TrimSpace(sessionCookie) == "" {
+		return nil, "", fmt.Errorf("no stored Jira session found in keychain for '%s'", configuredLogin)
+	}
+
+	client := jira.NewClient(jira.Config{
+		Server:   server,
+		APIToken: sessionCookie,
+		AuthType: &[]jira.AuthType{jira.AuthTypeCookie}[0],
+	})
+	me, err := client.Me()
+	if err != nil {
+		return nil, "", fmt.Errorf("stored Jira session is missing or expired: %w", err)
+	}
+	if me.Login != configuredLogin {
+		return nil, "", fmt.Errorf("stored Jira session belongs to '%s' but config expects '%s'", me.Login, configuredLogin)
+	}
+
+	return me, sessionCookie, nil
+}
 
 func persistAuthenticatedSession(me *jira.Me, sessionCookie, configured string) {
 	configuredLogin := strings.TrimSpace(configured)
@@ -142,87 +160,20 @@ func persistAuthenticatedSession(me *jira.Me, sessionCookie, configured string) 
 	}
 
 	cmdutil.Success("SSO login completed for %s (%s)", me.Name, me.Login)
-	cmdutil.Warn("Your browser-backed Jira session is now stored in the keychain. Run 'jira session warmup' if the first request still needs reheating.")
+	cmdutil.Warn("Your browser-backed Jira session is now stored in the keychain. Run 'jira auth status' to verify it or 'jira auth reauth' when it expires.")
+	if configuredLogin == "" {
+		cmdutil.Warn("Config login is empty; non-auth commands will not be able to read this keychain entry until login is set in config.")
+	}
 }
 
 func existingStoredSession(server, configured string) (*jira.Me, string, bool) {
-	configuredLogin := strings.TrimSpace(configured)
-	if configuredLogin == "" {
-		return nil, "", false
-	}
-
-	sessionCookie, err := keyring.Get("jira-cli", configuredLogin)
-	if err != nil || strings.TrimSpace(sessionCookie) == "" {
-		return nil, "", false
-	}
-
-	client := jira.NewClient(jira.Config{
-		Server:   server,
-		APIToken: sessionCookie,
-		AuthType: &[]jira.AuthType{jira.AuthTypeCookie}[0],
-	})
-	me, err := client.Me()
+	me, sessionCookie, err := storedSession(server, configured)
 	if err != nil {
-		return nil, "", false
-	}
-	if me.Login != configuredLogin {
 		return nil, "", false
 	}
 
 	cmdutil.Success("Existing Jira session is still valid for %s (%s)", me.Name, me.Login)
 	return me, sessionCookie, true
-}
-
-func authenticateViaBrowser(server, expectedLogin string) (*jira.Me, string, error) {
-	cmdutil.Warn("A browser window will open. Complete the BBVA login there, including second factor.")
-	if err := jiraBrowser.BrowseWithDevTools(server); err != nil {
-		return nil, "", fmt.Errorf("unable to open browser: %w", err)
-	}
-
-	var copied bool
-	confirm := &survey.Confirm{
-		Message: "After login, copy a Jira REST/XHR request as cURL to your clipboard. Ready to import it now?",
-		Default: true,
-	}
-	if err := survey.AskOne(confirm, &copied); err != nil {
-		return nil, "", err
-	}
-	if !copied {
-		return nil, "", fmt.Errorf("browser-assisted SSO cancelled before importing the session")
-	}
-
-	curlText, _ := clipboard.ReadAll()
-	sessionCookie, err := jira.ExtractCookieTokenFromCurlText(curlText)
-	if err != nil {
-		var pasted string
-		prompt := &survey.Password{
-			Message: "Paste the full 'Copy as cURL' request here:",
-			Help:    "Open DevTools in the logged-in browser, copy a working Jira REST/XHR request as cURL, and paste it here.",
-		}
-		if askErr := survey.AskOne(prompt, &pasted, survey.WithValidator(survey.Required)); askErr != nil {
-			return nil, "", askErr
-		}
-		sessionCookie, err = jira.ExtractCookieTokenFromCurlText(pasted)
-		if err != nil {
-			return nil, "", fmt.Errorf("failed to extract Cookie header from copied cURL: %w", err)
-		}
-	}
-
-	client := jira.NewClient(jira.Config{
-		Server:   server,
-		APIToken: sessionCookie,
-		AuthType: &[]jira.AuthType{jira.AuthTypeCookie}[0],
-	})
-	_, _ = client.WarmupSession()
-	me, err := client.Me()
-	if err != nil {
-		return nil, "", fmt.Errorf("imported browser session is not valid: %w", err)
-	}
-	if expectedLogin != "" && me.Login != expectedLogin {
-		return nil, "", fmt.Errorf("imported browser session belongs to '%s' but config expects '%s'", me.Login, expectedLogin)
-	}
-
-	return me, sessionCookie, nil
 }
 
 func configuredLogin(login string) string {

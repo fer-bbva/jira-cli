@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
-	"runtime"
 
 	"github.com/google/shlex"
 	"github.com/pkg/browser"
@@ -41,21 +40,6 @@ func Browse(url string) error {
 
 	return cmd.Run()
 }
-
-// BrowseWithDevTools opens a URL in a browser and tries to auto-open devtools when supported.
-func BrowseWithDevTools(url string) error {
-	if runtime.GOOS == "darwin" {
-		cmd := exec.Command("open", "-na", "Google Chrome", "--args", "--new-window", "--auto-open-devtools-for-tabs", url)
-		cmd.Stdout = &bytes.Buffer{}
-		cmd.Stderr = &bytes.Buffer{}
-		if err := cmd.Run(); err == nil {
-			return nil
-		}
-	}
-
-	return Browse(url)
-}
-
 func getBrowserFromENV() string {
 	br := os.Getenv("JIRA_BROWSER")
 	if br == "" {
