@@ -311,8 +311,7 @@ func (c *JiraCLIConfigGenerator) configureMTLS() error {
 }
 
 func (c *JiraCLIConfigGenerator) configureCookie() error {
-	cmdutil.Warn("Cookie auth now uses browser-backed SSO via Playwright.")
-	cmdutil.Warn("This init flow will only write config. After init, run 'jira auth sso' to create the session and 'jira auth reauth' to renew it later.")
+	cmdutil.Warn("Cookie auth uses Playwright-backed SSO. After init, run 'jira auth sso'.")
 
 	return nil
 }

@@ -11,66 +11,6 @@ import (
 
 const cookieWarmupAttempts = 5
 
-// WarmupSession refreshes cookie-based session state by simulating a small same-site browser flow
-// before retrying a low-cost REST endpoint.
-func (c *Client) WarmupSession() (*ServerInfo, error) {
-	httpClient := &http.Client{Transport: c.transport, Jar: c.jar}
-	ctx := context.Background()
-
-	return c.warmupServerSession(ctx, httpClient, c.server+baseURLv2+"/serverInfo")
-}
-
-// WarmupAgileSession refreshes agile session state for the configured board.
-func (c *Client) WarmupAgileSession(boardID int) error {
-	if boardID <= 0 {
-		return nil
-	}
-
-	httpClient := &http.Client{Transport: c.transport, Jar: c.jar}
-	ctx := context.Background()
-	boardURL := fmt.Sprintf("%s%s/board/%d/sprint?state=active&startAt=0&maxResults=1", c.server, baseURLv1, boardID)
-
-	if err := c.warmupCookieSession(ctx, httpClient, boardURL); err != nil {
-		return err
-	}
-
-	_, err := c.Sprints(boardID, "state=active", 0, 1)
-
-	return err
-}
-
-// WarmupIssueSession refreshes browser-backed session state for an issue-centric flow.
-func (c *Client) WarmupIssueSession(key string) error {
-	if key == "" {
-		return nil
-	}
-
-	httpClient := &http.Client{Transport: c.transport, Jar: c.jar}
-	ctx := context.Background()
-
-	return c.warmupCookieSession(ctx, httpClient, c.server+"/browse/"+key)
-}
-
-func (c *Client) warmupServerSession(ctx context.Context, httpClient *http.Client, target string) (*ServerInfo, error) {
-	var lastErr error
-
-	for range cookieWarmupAttempts {
-		_ = c.warmupCookieSession(ctx, httpClient, target)
-
-		info, err := c.ServerInfo()
-		if err == nil {
-			return info, nil
-		}
-		lastErr = err
-	}
-
-	if lastErr == nil {
-		lastErr = fmt.Errorf("unable to warm up jira session")
-	}
-
-	return nil, lastErr
-}
-
 func (c *Client) warmupCookieSession(ctx context.Context, httpClient *http.Client, target string) error {
 	var lastErr error
 	success := false

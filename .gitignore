@@ -14,4 +14,3 @@ vendor/
 /.gocache
 
 .vscode/
-.playwright-cli/

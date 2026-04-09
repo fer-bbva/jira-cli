@@ -160,10 +160,6 @@ func persistAuthenticatedSession(me *jira.Me, sessionCookie, configured string) 
 	}
 
 	cmdutil.Success("SSO login completed for %s (%s)", me.Name, me.Login)
-	cmdutil.Warn("Your browser-backed Jira session is now stored in the keychain. Run 'jira auth status' to verify it or 'jira auth reauth' when it expires.")
-	if configuredLogin == "" {
-		cmdutil.Warn("Config login is empty; non-auth commands will not be able to read this keychain entry until login is set in config.")
-	}
 }
 
 func existingStoredSession(server, configured string) (*jira.Me, string, bool) {

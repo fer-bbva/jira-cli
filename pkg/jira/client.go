@@ -36,7 +36,7 @@ const (
 	apiVersion2 = "v2"
 	apiVersion3 = "v3"
 
-	browserUserAgent        = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+	browserUserAgent       = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 	cookieRetryAttemptsMax = 4
 )
 
@@ -49,12 +49,12 @@ var (
 
 // ErrUnexpectedResponse denotes response code other than the expected one.
 type ErrUnexpectedResponse struct {
-	Body       Errors
-	Status     string
-	StatusCode int
-	Username   string
+	Body        Errors
+	Status      string
+	StatusCode  int
+	Username    string
 	LoginReason string
-	AuthRealm  string
+	AuthRealm   string
 }
 
 func (e *ErrUnexpectedResponse) Error() string {
@@ -287,7 +287,6 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body []by
 		err error
 	)
 
-
 	// Set default auth type to `basic`.
 	if c.authType == nil {
 		basic := AuthTypeBasic
@@ -312,7 +311,7 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body []by
 		return nil, err
 	}
 
-	if c.authType.String() == string(AuthTypeCookie) && method == http.MethodGet && !strings.HasSuffix(endpoint, baseURLv2+"/serverInfo") {
+	if c.authType.String() == string(AuthTypeCookie) && method == http.MethodGet {
 		for attempt := 0; attempt < cookieRetryAttemptsMax && res.StatusCode == http.StatusUnauthorized; attempt++ {
 			_ = res.Body.Close()
 
@@ -489,11 +488,11 @@ func formatUnexpectedResponse(res *http.Response) *ErrUnexpectedResponse {
 	_ = json.NewDecoder(res.Body).Decode(&b)
 
 	return &ErrUnexpectedResponse{
-		Body:       b,
-		Status:     res.Status,
-		StatusCode: res.StatusCode,
-		Username:   res.Header.Get("X-AUSERNAME"),
+		Body:        b,
+		Status:      res.Status,
+		StatusCode:  res.StatusCode,
+		Username:    res.Header.Get("X-AUSERNAME"),
 		LoginReason: res.Header.Get("X-Seraph-LoginReason"),
-		AuthRealm:  res.Header.Get("WWW-Authenticate"),
+		AuthRealm:   res.Header.Get("WWW-Authenticate"),
 	}
 }

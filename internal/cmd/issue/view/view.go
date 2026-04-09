@@ -78,9 +78,6 @@ func viewRaw(cmd *cobra.Command, args []string) {
 		defer s.Stop()
 
 		client := api.DefaultClient(debug)
-		if viper.GetString("auth_type") == string(jira.AuthTypeCookie) {
-			_ = client.WarmupIssueSession(key)
-		}
 		return api.ProxyGetIssueRaw(client, key)
 	}()
 	cmdutil.ExitIfError(err)
@@ -107,9 +104,6 @@ func viewPretty(cmd *cobra.Command, args []string) {
 		defer s.Stop()
 
 		client := api.DefaultClient(debug)
-		if viper.GetString("auth_type") == string(jira.AuthTypeCookie) {
-			_ = client.WarmupIssueSession(key)
-		}
 		return api.ProxyGetIssue(client, key, issue.NewNumCommentsFilter(comments))
 	}()
 	cmdutil.ExitIfError(err)

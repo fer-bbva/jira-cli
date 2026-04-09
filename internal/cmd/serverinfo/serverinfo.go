@@ -2,7 +2,6 @@ package serverinfo
 
 import (
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 
 	"github.com/ankitpokhrel/jira-cli/api"
 	"github.com/ankitpokhrel/jira-cli/internal/cmdutil"
@@ -29,15 +28,7 @@ func serverInfo(cmd *cobra.Command, _ []string) {
 		s := cmdutil.Info("Fetching server info...")
 		defer s.Stop()
 
-		client := api.DefaultClient(debug)
-		if viper.GetString("auth_type") == string(jira.AuthTypeCookie) {
-			info, err := client.WarmupSession()
-			if err == nil {
-				return info, nil
-			}
-		}
-
-		info, err := client.ServerInfo()
+		info, err := api.DefaultClient(debug).ServerInfo()
 		if err != nil {
 			return nil, err
 		}

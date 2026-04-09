@@ -78,9 +78,6 @@ func sprintList(cmd *cobra.Command, args []string) {
 	cmdutil.ExitIfError(err)
 
 	client := api.DefaultClient(debug)
-	if viper.GetString("auth_type") == string(jira.AuthTypeCookie) {
-		_ = client.WarmupAgileSession(boardID)
-	}
 
 	sprintQuery, err := query.NewSprint(cmd.Flags())
 	cmdutil.ExitIfError(err)
@@ -109,22 +106,11 @@ func singleSprintView(sprintQuery *query.Sprint, flags query.FlagParser, boardID
 		}
 		resp, err := client.SprintIssues(sprintID, q.Get(), q.Params().From, q.Params().Limit)
 		if err != nil {
-			if viper.GetString("auth_type") == string(jira.AuthTypeCookie) {
-				_, fallbackIssues, fallbackErr := client.GreenhopperSprintIssuesByID(boardID, sprintID)
-				if fallbackErr == nil {
-					return fallbackIssues, nil
-				}
-			}
 			return nil, err
 		}
 		return resp.Issues, nil
 	}()
 	cmdutil.ExitIfError(err)
-
-	renderSprintIssuesView(flags, sprintQuery, boardID, sprintID, project, server, client, sprint, issues)
-}
-
-func renderSprintIssuesView(flags query.FlagParser, sprintQuery *query.Sprint, boardID, sprintID int, project, server string, client *jira.Client, sprint *jira.Sprint, issues []*jira.Issue) {
 
 	if len(issues) == 0 {
 		fmt.Println()
@@ -211,12 +197,6 @@ func sprintExplorerView(sprintQuery *query.Sprint, flags query.FlagParser, board
 
 		return client.SprintsInBoards([]int{boardID}, sprintQuery.Get(), numSprints)
 	}()
-	if len(sprints) == 0 && viper.GetString("auth_type") == string(jira.AuthTypeCookie) {
-		fallbackSprints, err := client.GreenhopperSprints(boardID, sprintQuery.Get())
-		if err == nil {
-			sprints = fallbackSprints
-		}
-	}
 	if len(sprints) == 0 {
 		fmt.Println()
 		cmdutil.Failed("No result found for given query in project %q", project)
@@ -224,21 +204,6 @@ func sprintExplorerView(sprintQuery *query.Sprint, flags query.FlagParser, board
 	}
 
 	if sprintQuery.Params().Current || sprintQuery.Params().Prev || sprintQuery.Params().Next {
-		if viper.GetString("auth_type") == string(jira.AuthTypeCookie) {
-			state := jira.SprintStateActive
-			switch {
-			case sprintQuery.Params().Prev:
-				state = jira.SprintStateClosed
-			case sprintQuery.Params().Next:
-				state = jira.SprintStateFuture
-			}
-			fallbackSprint, fallbackIssues, err := client.GreenhopperSprintIssuesByState(boardID, state)
-			if err == nil && fallbackSprint != nil {
-				renderSprintIssuesView(flags, sprintQuery, boardID, fallbackSprint.ID, project, server, client, fallbackSprint, fallbackIssues)
-				return
-			}
-		}
-
 		sprint := sprints[0]
 		if sprintQuery.Params().Next {
 			sprint = sprints[len(sprints)-1]
