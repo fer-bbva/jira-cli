@@ -2,14 +2,18 @@ package sso
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/AlecAivazis/survey/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/zalando/go-keyring"
 
 	"github.com/ankitpokhrel/jira-cli/internal/cmdutil"
+	jiraConfig "github.com/ankitpokhrel/jira-cli/internal/config"
 	"github.com/ankitpokhrel/jira-cli/pkg/jira"
 )
 
@@ -50,6 +54,7 @@ func authenticate(cmd *cobra.Command, _ []string) {
 	server, login := cookieAuthContext()
 
 	if _, _, ok := existingStoredSession(server, login); ok {
+		persistCookieAuthConfig(server, login)
 		return
 	}
 
@@ -61,6 +66,7 @@ func authenticate(cmd *cobra.Command, _ []string) {
 		return
 	}
 
+	persistCookieAuthConfig(server, login)
 	persistAuthenticatedSession(me, sessionCookie, login)
 }
 
@@ -87,6 +93,7 @@ func reauth(_ *cobra.Command, _ []string) {
 		return
 	}
 
+	persistCookieAuthConfig(server, login)
 	persistAuthenticatedSession(me, sessionCookie, login)
 }
 
@@ -98,21 +105,173 @@ func requirePlaywrightCLI(command string) {
 
 func cookieAuthContext() (string, string) {
 	authType := viper.GetString("auth_type")
-	if authType != string(jira.AuthTypeCookie) {
-		cmdutil.Failed("This command requires auth_type=cookie in your config (current auth_type: %s)", authType)
+	if authType != "" && authType != string(jira.AuthTypeCookie) {
+		cmdutil.Warn("Config auth_type=%s will be updated to cookie for browser-backed SSO.", authType)
 	}
 
 	server := strings.TrimSpace(viper.GetString("server"))
-	if server == "" {
-		cmdutil.Failed("Missing server in config. Run 'jira init --auth-type cookie' first.")
-	}
-
 	login := strings.TrimSpace(viper.GetString("login"))
-	if login == "" {
-		cmdutil.Failed("Missing login in config for cookie auth. Run 'jira init --auth-type cookie' first.")
+
+	var err error
+	server, login, err = promptCookieAuthBootstrap(server, login)
+	if err != nil {
+		cmdutil.Failed("Failed to read cookie auth settings: %s", err.Error())
 	}
 
 	return server, login
+}
+
+func promptCookieAuthBootstrap(server, login string) (string, string, error) {
+	questions := make([]*survey.Question, 0, 2)
+
+	if strings.TrimSpace(server) == "" {
+		questions = append(questions, &survey.Question{
+			Name: "server",
+			Prompt: &survey.Input{
+				Message: "Link to Jira server:",
+				Help:    "This is the Jira base URL, for example https://jira.globaldevtools.bbva.com.",
+			},
+			Validate: func(val interface{}) error {
+				str, ok := val.(string)
+				if !ok || strings.TrimSpace(str) == "" {
+					return fmt.Errorf("not a valid URL")
+				}
+				parsed, err := url.Parse(strings.TrimSpace(str))
+				if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+					return fmt.Errorf("not a valid URL")
+				}
+				if parsed.Scheme != "http" && parsed.Scheme != "https" {
+					return fmt.Errorf("not a valid URL")
+				}
+				return nil
+			},
+		})
+	}
+
+	if strings.TrimSpace(login) == "" {
+		questions = append(questions, &survey.Question{
+			Name: "login",
+			Prompt: &survey.Input{
+				Message: "Jira login username:",
+				Help:    "This is the login that jira-cli will use to find the browser-backed session in the keychain.",
+			},
+			Validate: survey.Required,
+		})
+	}
+
+	if len(questions) == 0 {
+		return strings.TrimSpace(server), strings.TrimSpace(login), nil
+	}
+
+	answers := struct {
+		Server string
+		Login  string
+	}{}
+
+	if err := survey.Ask(questions, &answers); err != nil {
+		return "", "", err
+	}
+
+	if strings.TrimSpace(server) == "" {
+		server = answers.Server
+	}
+	if strings.TrimSpace(login) == "" {
+		login = answers.Login
+	}
+
+	return strings.TrimSpace(server), strings.TrimSpace(login), nil
+}
+
+func persistCookieAuthConfig(server, login string) {
+	path, err := jiraCLIConfigPath()
+	if err != nil {
+		cmdutil.Failed("Failed to resolve jira config path: %s", err.Error())
+		return
+	}
+
+	config := viper.New()
+	config.SetConfigFile(path)
+	config.SetConfigType(configFileType(path))
+
+	if jiraConfig.Exists(path) {
+		if err := config.ReadInConfig(); err != nil {
+			cmdutil.Failed("Failed to read jira config %s: %s", path, err.Error())
+			return
+		}
+	}
+
+	config.Set("auth_type", jira.AuthTypeCookie.String())
+	config.Set("server", strings.TrimSpace(server))
+	config.Set("login", strings.TrimSpace(login))
+	if strings.TrimSpace(config.GetString("installation")) == "" {
+		config.Set("installation", inferInstallationFromServer(server))
+	}
+
+	if !jiraConfig.Exists(path) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			cmdutil.Failed("Failed to create jira config directory: %s", err.Error())
+			return
+		}
+		if err := config.WriteConfigAs(path); err != nil {
+			cmdutil.Failed("Failed to write jira config %s: %s", path, err.Error())
+			return
+		}
+		cmdutil.Success("Created Jira config at %s", path)
+		return
+	}
+
+	if err := config.WriteConfig(); err != nil {
+		cmdutil.Failed("Failed to update jira config %s: %s", path, err.Error())
+	}
+}
+
+func jiraCLIConfigPath() (string, error) {
+	if path := strings.TrimSpace(viper.GetString("config")); path != "" {
+		return normalizeConfigPath(path), nil
+	}
+	if path := strings.TrimSpace(os.Getenv("JIRA_CONFIG_FILE")); path != "" {
+		return normalizeConfigPath(path), nil
+	}
+	if path := strings.TrimSpace(viper.ConfigFileUsed()); path != "" {
+		return path, nil
+	}
+
+	home, err := cmdutil.GetConfigHome()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(home, jiraConfig.Dir, jiraConfig.FileName+"."+jiraConfig.FileType), nil
+}
+
+func normalizeConfigPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return trimmed
+	}
+	if ext := strings.ToLower(filepath.Ext(trimmed)); ext == ".yml" || ext == ".yaml" {
+		return trimmed
+	}
+	return trimmed + "." + jiraConfig.FileType
+}
+
+func configFileType(path string) string {
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+	if ext == "yaml" {
+		return ext
+	}
+	if ext == jiraConfig.FileType {
+		return ext
+	}
+	return jiraConfig.FileType
+}
+
+func inferInstallationFromServer(server string) string {
+	parsed, err := url.Parse(strings.TrimSpace(server))
+	if err == nil && strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".atlassian.net") {
+		return jira.InstallationTypeCloud
+	}
+	return jira.InstallationTypeLocal
 }
 
 func storedSession(server, configured string) (*jira.Me, string, error) {
